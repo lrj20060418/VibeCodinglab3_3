@@ -111,6 +111,9 @@ npm run build
 | 手机端全流程验证 | 首屏 + 新建规划 → 选点 → 天气 → 保存 | 自行截图 |
 | 资源监控 | 云函数调用次数、静态托管流量 | 控制台「资源监控」截图 |
 
+若课程要求 Git 提交说明为中文而本机 `git commit -m` 出现乱码，可在仓库根执行：  
+`git commit --amend -m "feat: v2.1 前端部署至 CloudBase 静态托管，全链路上线"` 后 `git push --force-with-lease`（仅当你确定要覆盖远端该条提交时）。
+
 ## 部署提示
 
 1. 根目录 `cloudbaserc.json` 中 `envId` 需与你的环境一致（当前示例已为绑定环境）。
