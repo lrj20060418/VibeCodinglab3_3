@@ -104,7 +104,7 @@ exports.main = async (event, _context) => {
     .toLowerCase()
 
   try {
-    const db = getDb()
+    const db = await getDb()
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
     if (!plan) return httpError(404, 'Plan not found')
 

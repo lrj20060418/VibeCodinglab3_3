@@ -3,9 +3,10 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const Database = require('better-sqlite3')
 
-let db
+let wrappedDb = null
+let opening = null
+let inTx = false
 
 function defaultDbPath() {
   const fromEnv = (process.env.LAB3_DB_PATH || '').trim()
@@ -17,10 +18,9 @@ function defaultDbPath() {
   return path.join(dir, 'app.db')
 }
 
-function initDb(database) {
-  database.pragma('journal_mode = WAL')
-  database.pragma('foreign_keys = ON')
-  database.exec(`
+function initSchema(sqlDb) {
+  sqlDb.run('PRAGMA foreign_keys = ON;')
+  sqlDb.exec(`
     CREATE TABLE IF NOT EXISTS plans (
       id TEXT PRIMARY KEY,
       title TEXT,
@@ -59,13 +59,99 @@ function initDb(database) {
   `)
 }
 
-function getDb() {
-  if (!db) {
-    const p = defaultDbPath()
-    db = new Database(p)
-    initDb(db)
-  }
-  return db
+function saveToDisk(dbPath, sqlDb) {
+  const data = sqlDb.export()
+  fs.writeFileSync(dbPath, Buffer.from(data))
 }
 
-module.exports = { getDb, initDb }
+function createWrapper(sqlDb, dbPath) {
+  function persist() {
+    if (!inTx) saveToDisk(dbPath, sqlDb)
+  }
+
+  function prepare(sql) {
+    return {
+      get(...args) {
+        const stmt = sqlDb.prepare(sql)
+        try {
+          if (args.length) stmt.bind(args)
+          if (!stmt.step()) return undefined
+          return stmt.getAsObject()
+        } finally {
+          stmt.free()
+        }
+      },
+      all(...args) {
+        const stmt = sqlDb.prepare(sql)
+        const rows = []
+        try {
+          if (args.length) stmt.bind(args)
+          while (stmt.step()) rows.push(stmt.getAsObject())
+          return rows
+        } finally {
+          stmt.free()
+        }
+      },
+      run(...args) {
+        const stmt = sqlDb.prepare(sql)
+        try {
+          if (args.length) stmt.bind(args)
+          stmt.step()
+          const changes = sqlDb.getRowsModified()
+          return { changes }
+        } finally {
+          stmt.free()
+          persist()
+        }
+      },
+    }
+  }
+
+  function transaction(fn) {
+    return () => {
+      inTx = true
+      sqlDb.run('BEGIN;')
+      try {
+        fn()
+        sqlDb.run('COMMIT;')
+      } catch (e) {
+        try {
+          sqlDb.run('ROLLBACK;')
+        } catch (_) {}
+        throw e
+      } finally {
+        inTx = false
+        saveToDisk(dbPath, sqlDb)
+      }
+    }
+  }
+
+  return { prepare, transaction }
+}
+
+async function getDb() {
+  if (wrappedDb) return wrappedDb
+  if (!opening) {
+    opening = (async () => {
+      const initSqlJs = require('sql.js')
+      const wasmDir = path.dirname(require.resolve('sql.js'))
+      const SQL = await initSqlJs({
+        locateFile: (file) => path.join(wasmDir, file),
+      })
+      const dbPath = defaultDbPath()
+      let sqlDb
+      if (fs.existsSync(dbPath)) {
+        sqlDb = new SQL.Database(new Uint8Array(fs.readFileSync(dbPath)))
+      } else {
+        sqlDb = new SQL.Database()
+      }
+      initSchema(sqlDb)
+      saveToDisk(dbPath, sqlDb)
+      wrappedDb = createWrapper(sqlDb, dbPath)
+      return wrappedDb
+    })()
+  }
+  return opening
+}
+
+module.exports = { getDb }

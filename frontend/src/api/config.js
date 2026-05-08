@@ -11,14 +11,12 @@ export function planApiBase() {
   return trimEndSlash(import.meta.env.VITE_CLOUD_PLAN_URL || '')
 }
 
+/** 天气与规划同库，须走 plan 云函数；独立 weather 云函数无法共享 /tmp 内 SQLite */
 export function weatherApiBase() {
-  const w = import.meta.env.VITE_CLOUD_WEATHER_URL
-  if (w) return trimEndSlash(w)
   return planApiBase()
 }
 
+/** AI 摘要与规划同库，须走 plan 云函数 */
 export function chatApiBase() {
-  const c = import.meta.env.VITE_CLOUD_CHAT_URL
-  if (c) return trimEndSlash(c)
   return planApiBase()
 }

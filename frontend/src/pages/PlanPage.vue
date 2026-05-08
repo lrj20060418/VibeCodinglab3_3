@@ -157,7 +157,15 @@ async function openPlan(planId) {
     form.people_count = p.people_count ?? ''
     form.preferences = p.preferences || ''
   } catch (e) {
-    planError.value = e?.message || '加载规划失败'
+    const msg = e?.message || '加载规划失败'
+    if (e?.status === 404 || /not found/i.test(msg)) {
+      localStorage.removeItem(LAST_OPEN_PLAN_ID_KEY)
+      selectedPlanId.value = null
+      planError.value =
+        '该规划不存在或已失效（例如切换了云端环境、或多实例尚未同步）。请从左侧列表重新选择或新建。'
+    } else {
+      planError.value = msg
+    }
   } finally {
     planLoading.value = false
   }

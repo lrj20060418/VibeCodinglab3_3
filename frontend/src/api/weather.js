@@ -1,6 +1,6 @@
-import { weatherApiBase } from './config'
+import { planApiBase } from './config'
 
-const API_BASE = weatherApiBase()
+const API_BASE = planApiBase()
 
 async function http(method, path) {
   const res = await fetch(`${API_BASE}${path}`, { method })

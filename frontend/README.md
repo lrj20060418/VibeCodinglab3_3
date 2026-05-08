@@ -14,14 +14,14 @@ npm run dev
 
 实验要求：**不用 Vite dev server**，用纯静态服务器打开前端，同时 API 走 CloudBase 公网。
 
-1. 复制并填写生产环境变量（含三个 `VITE_CLOUD_*` 与高德 `VITE_AMAP_*`）：
+1. 复制并填写生产环境变量（含 **`VITE_CLOUD_PLAN_URL`** 与高德 `VITE_AMAP_*`；天气与 AI 与 plan 同源）：
 
 ```bash
 cd frontend
 copy .env.production.example .env.production
 ```
 
-编辑 `.env.production` 中的 `VITE_CLOUD_PLAN_URL` / `VITE_CLOUD_WEATHER_URL` / `VITE_CLOUD_CHAT_URL`（与控制台云函数网关 HTTP 地址一致，**不要**末尾 `/`）。
+编辑 `.env.production` 中的 `VITE_CLOUD_PLAN_URL`（与控制台 **plan** 云函数 HTTP 访问地址一致，**不要**末尾 `/`）。
 
 2. 构建并启动静态服务（在 `dist` 目录起服务，避免根路径 404）：
 

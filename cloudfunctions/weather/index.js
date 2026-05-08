@@ -80,7 +80,13 @@ async function fetchLiveWeatherByAdcode(adcode) {
   }
   const data = await res.json()
   if (data.status !== '1') {
-    const err = new Error(`AMap weather error: ${data.info || 'unknown'}`)
+    const info = String(data.info || 'unknown')
+    let hint = ''
+    if (info === 'USERKEY_PLAT_NOMATCH' || info.includes('USERKEY_PLAT')) {
+      hint =
+        ' 请使用高德「Web服务」Key（restapi.amap.com），勿用「Web端(JS API)」Key。'
+    }
+    const err = new Error(`AMap weather error: ${info}${hint}`)
     err.code = 'UPSTREAM'
     throw err
   }
@@ -133,7 +139,7 @@ exports.main = async (event, _context) => {
     const m = path.match(/^\/api\/plans\/([^/]+)\/weather\/live$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const db = getDb()
+      const db = await getDb()
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       if (!plan) return httpError(404, 'Plan not found')
       const rows = db

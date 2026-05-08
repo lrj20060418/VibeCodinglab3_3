@@ -1,6 +1,6 @@
-import { chatApiBase } from './config'
+import { planApiBase } from './config'
 
-const API_BASE = chatApiBase()
+const API_BASE = planApiBase()
 
 async function http(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
