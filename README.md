@@ -8,7 +8,7 @@
 project/
 ├── frontend/                 # Lab 3-2 前端（Vue 3 + Vite），沿用
 ├── cloudfunctions/
-│   ├── plan/                 # 规划 + 同库天气/AI：plans…、/api/weather/live、/api/plans/:id/weather/live、/api/plans/:id/ai/summary
+│   ├── plan/                 # 规划 + 同库天气/AI：…、POST /api/plans/:id/ai/summary、GET /api/plans/:id/ai/summary/stream（SSE）
 │   ├── weather/              # 可选独立部署（与 plan 的 /tmp 不共享，线上请优先走 plan 路由）
 │   └── chat/                 # 可选独立部署（同上）
 ├── .cursor/
@@ -26,7 +26,7 @@ project/
 
 | 云函数 | 职责 | 主要路径 |
 |--------|------|----------|
-| `plan` | SQLite CRUD、行程、导出、规则检查、**高德天气**、**AI 摘要**（同进程同库） | `/api/plans...`、`/api/weather/live`、`/api/plans/:id/weather/live`、`POST /api/plans/:id/ai/summary`、`/health` |
+| `plan` | SQLite CRUD、行程、导出、规则检查、**高德天气**、**AI 摘要**（内置混元/DeepSeek 或外部 LLM；流式 SSE） | `/api/plans...`、`/api/weather/live`、`/api/plans/:id/weather/live`、`POST /api/plans/:id/ai/summary`、`GET /api/plans/:id/ai/summary/stream`、`/health` |
 | `weather` | 仅保留兼容；各函数 `/tmp` 隔离，**勿**把「按规划拉天气」指到本函数 | 同左路径若部署在 plan 上 |
 | `chat` | 仅保留兼容；**AI 摘要**请在控制台为 **plan** 配置 `LLM_*` | 同左 |
 
@@ -111,17 +111,36 @@ npm run build
 | 环境文件不入库 | `.gitignore` 已忽略 `.env`、`.env.*`，仅保留 `*.env.example` | 本仓库 `.gitignore` |
 | 前端仅高德 JS Key | `frontend/src` 无 LLM / 高德 Web 服务 Key | 代码审查 / `rg` |
 | 云函数 CORS 已收紧 | 默认仅静态托管 Origin + 本机调试 | `cloudfunctions/*/corsOrigin.js` |
-| 云函数密钥在控制台 | `AMAP_WEBSERVICE_KEY`、`LLM_*` 等仅在 CloudBase 环境变量配置 | 控制台截图 |
+| 云函数密钥在控制台 | `AMAP_WEBSERVICE_KEY` 等仅在 CloudBase 环境变量配置；v2.2 默认内置大模型可不配 `LLM_*` | 控制台截图 |
 | 手机端全流程验证 | 首屏 + 新建规划 → 选点 → 天气 → 保存 | 自行截图 |
 | 资源监控 | 云函数调用次数、静态托管流量 | 控制台「资源监控」截图 |
 
 若课程要求 Git 提交说明为中文而本机 `git commit -m` 出现乱码，可在仓库根执行：  
 `git commit --amend -m "feat: v2.1 前端部署至 CloudBase 静态托管，全链路上线"` 后 `git push --force-with-lease`（仅当你确定要覆盖远端该条提交时）。
 
+## Lab 3-3 v2.2：内置大模型 + SSE 流式 + GitHub Actions 部署
+
+### 内置大模型（与 v2.1 兼容）
+
+- **默认**：`plan` / `chat` 在未配置 `LLM_API_KEY` 时使用 **CloudBase 内置**模型（依赖 `@cloudbase/node-sdk` ≥3.16 的 `app.ai()`），云函数内 `TCB_ENV` 等由平台注入，一般**不必**再配 `LAB3_CLOUDBASE_ENV_ID`。
+- **仍用外部 Key**：照常配置 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，或显式 `LAB3_AI_BACKEND=external`。
+- **模型切换**：`LAB3_CLOUD_AI_PROVIDER=deepseek` 或 `LAB3_CLOUD_AI_MODEL=deepseek-v3.2` 等（见 `.env.example`）；默认混元 `hunyuan-2.0-instruct-20251111`。
+
+### 流式 AI（SSE + EventSource）
+
+- 网关路由：**`GET /api/plans/:planId/ai/summary/stream?style=normal`**（`style` 同 POST）。
+- 响应：`Content-Type: text/event-stream`，正文为 SSE：`data: {"delta":"..."}` 增量；结束为 `data: {"done":true}`；业务错误为自定义事件 **`summaryerror`**（仍 200，便于 EventSource 解析）。
+- **说明**：云函数 HTTP 一般为**整包返回**网关后再送达浏览器，与长连接真·逐包推送有差异；前端在收到完整响应后仍会**按 SSE 事件顺序**多次触发 `onDelta`，观感上为逐段追加。未配置 `VITE_CLOUD_PLAN_URL`（本地走 Vite 代理）时，前端会**自动回退**为 `POST /ai/summary` 非流式，避免代理不到 SSE。
+
+### CI/CD（GitHub Actions）
+
+- 工作流：`.github/workflows/deploy-cloudbase.yml`，在 **push 到 `master` 或 `main`** 时：`npm ci` + `npm run build`（前端），再 `tcb login --apiKeyId … --apiKey …`、`tcb fn deploy plan --force`、`tcb hosting deploy frontend/dist -e <envId>`。
+- 需在 GitHub **Actions secrets** 配置：`TCB_API_KEY_ID`、`TCB_API_KEY`、`TCB_ENV_ID`、`VITE_CLOUD_PLAN_URL`，以及构建所需的高德 `VITE_AMAP_*`（与生产构建一致）。密钥获取见 CloudBase 文档 [Using in the CI Environment](https://docs.cloudbase.net/en/framework/ci)。
+
 ## 部署提示
 
 1. 根目录 `cloudbaserc.json` 中 `envId` 需与你的环境一致（当前示例已为绑定环境）。
-2. 在 CloudBase 控制台为 **`plan`** 配置 **`AMAP_WEBSERVICE_KEY`**（须为高德控制台 **[Web服务] 类型** 的 Key，用于 `restapi.amap.com`；若误用 **Web端(JS API)** Key 会返回 `USERKEY_PLAT_NOMATCH`）以及 **`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`**（**AI 摘要接口在 `plan` 云函数上**，必须配在 **plan**，不要只配在 **chat**）。`weather` / `chat` 若仍单独部署，可按需配置，与前端默认走 plan 无冲突。
+2. 在 CloudBase 控制台为 **`plan`** 配置 **`AMAP_WEBSERVICE_KEY`**（须为高德控制台 **[Web服务] 类型** 的 Key；若误用 **Web端(JS API)** Key 会返回 `USERKEY_PLAT_NOMATCH`）。**大模型（v2.2）**：未配置 **`LLM_API_KEY`** 时默认走 **CloudBase 内置**混元/DeepSeek（`@cloudbase/node-sdk` ≥3.16 的 `ai().createModel().generateText` / `streamText`），**无需自建 Key**；若仍用外部 OpenAI 兼容接口，请配置 **`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`** 或设置 **`LAB3_AI_BACKEND=external`**。可选 **`LAB3_CLOUD_AI_PROVIDER`**（`hunyuan`/`deepseek`）与 **`LAB3_CLOUD_AI_MODEL`** 覆盖默认模型名。`weather` / `chat` 若仍单独部署，可按需配置。
 3. 使用 CloudBase CLI / 控制台上传云函数；至少为 **`plan`** 开启 **HTTP 访问**（如 `/lab3-plan`），路径需能转发到函数内识别的 `/api/...`（与 Lab 3-2 相同路径最省事）。
 4. **数据库**：当前 **`plan`** 使用 **SQLite**（默认 `os.tmpdir()/lab3-cloudfunctions/app.db`）。多实例下仍为进程内临时存储，实验可用；生产建议改为云数据库。
 

@@ -4,7 +4,7 @@ import { createPlan, getPlan, listPlans, updatePlan } from '../api/plans'
 import { addPlace, deletePlace, listPlaces } from '../api/places'
 import { getLiveWeatherByAdcode, getPlanLiveWeathers } from '../api/weather'
 import { getItinerary, saveItinerary } from '../api/itinerary'
-import { generatePlanSummary } from '../api/ai'
+import { streamPlanSummary } from '../api/ai'
 import { exportPlan, downloadJson, downloadText } from '../api/export'
 import { getPlanChecks } from '../api/checks'
 
@@ -410,10 +410,17 @@ async function runAiSummary() {
   aiSummary.value = ''
   aiLoading.value = true
   try {
-    const res = await generatePlanSummary(selectedPlanId.value, 'normal')
-    aiSummary.value = res.summary || ''
+    await streamPlanSummary(selectedPlanId.value, 'normal', {
+      onDelta(chunk) {
+        aiSummary.value += chunk
+      },
+      onDone() {},
+      onError(e) {
+        aiError.value = e?.message || 'AI 总结生成失败'
+      },
+    })
   } catch (e) {
-    aiError.value = e?.message || 'AI 总结生成失败'
+    if (!aiError.value) aiError.value = e?.message || 'AI 总结生成失败'
   } finally {
     aiLoading.value = false
   }

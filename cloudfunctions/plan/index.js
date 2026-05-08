@@ -9,7 +9,7 @@ const {
 } = require('./db')
 const { isCloudFunctionRuntime } = require('./cloudSqlite')
 const { fetchLiveWeatherByAdcode } = require('./amapWeather')
-const { chatComplete } = require('./llm')
+const { chatComplete, streamChatComplete } = require('./llm')
 const { buildChecks } = require('./checks')
 const { buildPlanExportJson, buildPlanExportMd } = require('./exportBuild')
 const { corsHeaders } = require('./corsOrigin')
@@ -68,6 +68,69 @@ function httpJson(event, statusCode, data) {
 
 function httpError(event, statusCode, message) {
   return httpJson(event, statusCode, { detail: message })
+}
+
+function buildSummaryMessages(planRow, placeRows, itineraryRows, weatherByPlace, style) {
+  const placeName = Object.fromEntries(placeRows.map((p) => [p.id, p.name || '地点']))
+  const groups = { morning: [], afternoon: [], evening: [] }
+  for (const it of itineraryRows) {
+    if (groups[it.time_slot]) groups[it.time_slot].push(it.place_id)
+  }
+  const fmtSlot = (key, label) => {
+    const ids = groups[key] || []
+    if (!ids.length) return `${label}：未安排`
+    return `${label}：` + ids.map((i) => placeName[i] || i).join('、')
+  }
+  const itineraryText = [fmtSlot('morning', '上午'), fmtSlot('afternoon', '下午'), fmtSlot('evening', '晚上')].join(
+    '\n'
+  )
+  const styleHint = {
+    short: '输出 6-10 行以内，直给重点。',
+    normal: '输出 10-18 行左右，分点说明。',
+    detailed: '输出更详细一些，分点+小标题。',
+  }[style] || '输出 10-18 行左右，分点说明。'
+  const system =
+    '你是一个出行规划助手。你的任务是对用户的出行规划做总结和改进建议。' +
+    '你必须基于提供的规划信息回答，不要编造不存在的地点或天气。' +
+    '输出中文，结构清晰，给出：优点、风险/不合理点、可改进建议。'
+  const context = {
+    plan: {
+      title: planRow.title,
+      date: planRow.date,
+      budget: planRow.budget,
+      people_count: planRow.people_count,
+      preferences: planRow.preferences,
+    },
+    places: placeRows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      address: p.address,
+      adcode: p.adcode,
+    })),
+    itinerary_text: itineraryText,
+    weather_by_place: weatherByPlace,
+  }
+  return [
+    { role: 'system', content: system },
+    { role: 'system', content: `输出要求：${styleHint}` },
+    { role: 'system', content: `规划上下文（JSON）：\n${JSON.stringify(context)}` },
+    { role: 'user', content: '请给出本次规划的 AI 辅助总结。' },
+  ]
+}
+
+function httpSse(event, statusCode, bodyText) {
+  return {
+    isBase64Encoded: false,
+    statusCode,
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      'X-Accel-Buffering': 'no',
+      ...corsHeaders(event),
+    },
+    body: bodyText,
+  }
 }
 
 async function loadPlanBundle(planId) {
@@ -401,6 +464,64 @@ exports.main = async (event, context) => {
       return httpJson(event,200, { weathers, errors })
     }
 
+    m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary\/stream$/)
+    if (m && method === 'GET') {
+      const planId = m[1]
+      const q = getQuery(event)
+      const style = String(q.style || 'normal')
+        .trim()
+        .toLowerCase()
+      const planRow = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      )
+      if (!planRow) {
+        return httpSse(
+          event,
+          200,
+          `event: summaryerror\ndata: ${JSON.stringify({ detail: 'Plan not found' })}\n\ndata: ${JSON.stringify({ done: true })}\n\n`
+        )
+      }
+      const placeRows = db
+        .prepare(
+          'SELECT * FROM places WHERE plan_id = ? ORDER BY sort_index ASC, datetime(created_at) ASC'
+        )
+        .all(planId)
+      const itineraryRows = db
+        .prepare(
+          'SELECT * FROM itinerary_items WHERE plan_id = ? ORDER BY time_slot ASC, sort_index ASC, datetime(created_at) ASC'
+        )
+        .all(planId)
+      const weatherByPlace = {}
+      for (const p of placeRows) {
+        const adcode = String(p.adcode || '').trim()
+        if (!adcode) continue
+        try {
+          weatherByPlace[p.id] = await fetchLiveWeatherByAdcode(adcode)
+        } catch (_) {
+          /* skip */
+        }
+      }
+      const messages = buildSummaryMessages(planRow, placeRows, itineraryRows, weatherByPlace, style)
+      try {
+        let sse = ''
+        for await (const delta of streamChatComplete(messages)) {
+          sse += `data: ${JSON.stringify({ delta })}\n\n`
+        }
+        sse += `data: ${JSON.stringify({ done: true })}\n\n`
+        return httpSse(event, 200, sse)
+      } catch (e) {
+        console.error(e)
+        const detail =
+          e.code === 'LLM_CONFIG' ? e.message : e.code === 'LLM_UPSTREAM' ? e.message : e.message || 'Internal error'
+        const payload = JSON.stringify({ detail, code: e.code || 'ERROR' })
+        return httpSse(
+          event,
+          200,
+          `event: summaryerror\ndata: ${payload}\n\ndata: ${JSON.stringify({ done: true })}\n\n`
+        )
+      }
+    }
+
     m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary$/)
     if (m && method === 'POST') {
       const planId = m[1]
@@ -431,51 +552,7 @@ exports.main = async (event, context) => {
           /* skip */
         }
       }
-      const placeName = Object.fromEntries(placeRows.map((p) => [p.id, p.name || '地点']))
-      const groups = { morning: [], afternoon: [], evening: [] }
-      for (const it of itineraryRows) {
-        if (groups[it.time_slot]) groups[it.time_slot].push(it.place_id)
-      }
-      const fmtSlot = (key, label) => {
-        const ids = groups[key] || []
-        if (!ids.length) return `${label}：未安排`
-        return `${label}：` + ids.map((i) => placeName[i] || i).join('、')
-      }
-      const itineraryText = [fmtSlot('morning', '上午'), fmtSlot('afternoon', '下午'), fmtSlot('evening', '晚上')].join(
-        '\n'
-      )
-      const styleHint = {
-        short: '输出 6-10 行以内，直给重点。',
-        normal: '输出 10-18 行左右，分点说明。',
-        detailed: '输出更详细一些，分点+小标题。',
-      }[style] || '输出 10-18 行左右，分点说明。'
-      const system =
-        '你是一个出行规划助手。你的任务是对用户的出行规划做总结和改进建议。' +
-        '你必须基于提供的规划信息回答，不要编造不存在的地点或天气。' +
-        '输出中文，结构清晰，给出：优点、风险/不合理点、可改进建议。'
-      const context = {
-        plan: {
-          title: planRow.title,
-          date: planRow.date,
-          budget: planRow.budget,
-          people_count: planRow.people_count,
-          preferences: planRow.preferences,
-        },
-        places: placeRows.map((p) => ({
-          id: p.id,
-          name: p.name,
-          address: p.address,
-          adcode: p.adcode,
-        })),
-        itinerary_text: itineraryText,
-        weather_by_place: weatherByPlace,
-      }
-      const messages = [
-        { role: 'system', content: system },
-        { role: 'system', content: `输出要求：${styleHint}` },
-        { role: 'system', content: `规划上下文（JSON）：\n${JSON.stringify(context)}` },
-        { role: 'user', content: '请给出本次规划的 AI 辅助总结。' },
-      ]
+      const messages = buildSummaryMessages(planRow, placeRows, itineraryRows, weatherByPlace, style)
       try {
         const summary = await chatComplete(messages)
         return httpJson(event,200, { summary })
