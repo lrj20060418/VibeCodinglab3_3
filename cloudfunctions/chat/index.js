@@ -2,6 +2,7 @@
 
 const { getDb } = require('./db')
 const { chatComplete } = require('./llm')
+const { corsHeaders } = require('./corsOrigin')
 
 async function fetchLiveWeatherByAdcode(adcode) {
   const key = (process.env.AMAP_WEBSERVICE_KEY || '').trim()
@@ -44,29 +45,20 @@ function normalizePath(event) {
   return raw
 }
 
-/** 阶段一：宽松 CORS；阶段二再收紧 Origin */
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  }
-}
-
-function httpJson(statusCode, data) {
+function httpJson(event, statusCode, data) {
   return {
     isBase64Encoded: false,
     statusCode,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      ...corsHeaders(),
+      ...corsHeaders(event),
     },
     body: JSON.stringify(data),
   }
 }
 
-function httpError(statusCode, message) {
-  return httpJson(statusCode, { detail: message })
+function httpError(event, statusCode, message) {
+  return httpJson(event, statusCode, { detail: message })
 }
 
 function parseBody(event) {
@@ -82,19 +74,19 @@ function parseBody(event) {
 exports.main = async (event, _context) => {
   const httpMethod = event.httpMethod || event.method || ''
   if (String(httpMethod).toUpperCase() === 'OPTIONS') {
-    return { statusCode: 204, headers: corsHeaders(), body: '' }
+    return { statusCode: 204, headers: corsHeaders(event), body: '' }
   }
 
   const method = String(httpMethod || 'GET').toUpperCase()
   const path = normalizePath(event)
 
   if (path === '/health' && method === 'GET') {
-    return httpJson(200, { ok: true })
+    return httpJson(event,200, { ok: true })
   }
 
   const m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary$/)
   if (!m || method !== 'POST') {
-    return httpError(404, 'Not found')
+    return httpError(event,404, 'Not found')
   }
 
   const planId = m[1]
@@ -106,7 +98,7 @@ exports.main = async (event, _context) => {
   try {
     const db = await getDb()
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-    if (!plan) return httpError(404, 'Plan not found')
+    if (!plan) return httpError(event,404, 'Plan not found')
 
     const places = db
       .prepare(
@@ -178,11 +170,11 @@ exports.main = async (event, _context) => {
     ]
 
     const summary = await chatComplete(messages)
-    return httpJson(200, { summary })
+    return httpJson(event,200, { summary })
   } catch (e) {
     console.error(e)
-    if (e.code === 'LLM_CONFIG') return httpError(500, e.message)
-    if (e.code === 'LLM_UPSTREAM') return httpError(502, e.message)
-    return httpError(500, e.message || 'Internal error')
+    if (e.code === 'LLM_CONFIG') return httpError(event,500, e.message)
+    if (e.code === 'LLM_UPSTREAM') return httpError(event,502, e.message)
+    return httpError(event,500, e.message || 'Internal error')
   }
 }

@@ -6,6 +6,7 @@ const { fetchLiveWeatherByAdcode } = require('./amapWeather')
 const { chatComplete } = require('./llm')
 const { buildChecks } = require('./checks')
 const { buildPlanExportJson, buildPlanExportMd } = require('./exportBuild')
+const { corsHeaders } = require('./corsOrigin')
 
 const ALLOWED_SLOTS = new Set(['morning', 'afternoon', 'evening'])
 
@@ -45,29 +46,20 @@ function parseBody(event) {
   }
 }
 
-/** 阶段一：宽松 CORS；阶段二再收紧 Access-Control-Allow-Origin 到静态托管域名 */
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  }
-}
-
-function httpJson(statusCode, data) {
+function httpJson(event, statusCode, data) {
   return {
     isBase64Encoded: false,
     statusCode,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      ...corsHeaders(),
+      ...corsHeaders(event),
     },
     body: JSON.stringify(data),
   }
 }
 
-function httpError(statusCode, message) {
-  return httpJson(statusCode, { detail: message })
+function httpError(event, statusCode, message) {
+  return httpJson(event, statusCode, { detail: message })
 }
 
 async function loadPlanBundle(planId) {
@@ -101,14 +93,14 @@ async function loadPlanBundle(planId) {
 exports.main = async (event, _context) => {
   const httpMethod = event.httpMethod || event.method || ''
   if (String(httpMethod).toUpperCase() === 'OPTIONS') {
-    return { statusCode: 204, headers: corsHeaders(), body: '' }
+    return { statusCode: 204, headers: corsHeaders(event), body: '' }
   }
 
   const method = String(httpMethod || 'GET').toUpperCase()
   const path = normalizePath(event)
 
   if (path === '/health' && method === 'GET') {
-    return httpJson(200, { ok: true })
+    return httpJson(event,200, { ok: true })
   }
 
   const db = await getDb()
@@ -119,11 +111,11 @@ exports.main = async (event, _context) => {
     /* ---- Plans ---- */
     if (path === '/api/plans' && method === 'GET') {
       const rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
-      return httpJson(200, rows)
+      return httpJson(event,200, rows)
     }
 
     if (path === '/api/plans' && method === 'POST') {
-      if (!body.date) return httpError(400, 'date required')
+      if (!body.date) return httpError(event,400, 'date required')
       const id = randomUUID()
       const t = nowIso()
       db.prepare(
@@ -140,21 +132,21 @@ exports.main = async (event, _context) => {
         t
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(id)
-      return httpJson(200, row)
+      return httpJson(event,200, row)
     }
 
     let m = path.match(/^\/api\/plans\/([^/]+)$/)
     if (m && method === 'GET') {
       const planId = m[1]
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-      if (!row) return httpError(404, 'Plan not found')
-      return httpJson(200, row)
+      if (!row) return httpError(event,404, 'Plan not found')
+      return httpJson(event,200, row)
     }
 
     if (m && method === 'PUT') {
       const planId = m[1]
       const cur = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-      if (!cur) return httpError(404, 'Plan not found')
+      if (!cur) return httpError(event,404, 'Plan not found')
       const merged = {
         ...cur,
         ...('title' in body ? { title: body.title } : {}),
@@ -176,7 +168,7 @@ exports.main = async (event, _context) => {
         planId
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-      return httpJson(200, row)
+      return httpJson(event,200, row)
     }
 
     /* ---- Places ---- */
@@ -184,19 +176,19 @@ exports.main = async (event, _context) => {
     if (m && method === 'GET') {
       const planId = m[1]
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const rows = db
         .prepare(
           'SELECT * FROM places WHERE plan_id = ? ORDER BY sort_index ASC, datetime(created_at) ASC'
         )
         .all(planId)
-      return httpJson(200, rows)
+      return httpJson(event,200, rows)
     }
 
     if (m && method === 'POST') {
       const planId = m[1]
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const placeId = randomUUID()
       const t = nowIso()
       db.prepare(
@@ -215,7 +207,7 @@ exports.main = async (event, _context) => {
         t
       )
       const row = db.prepare('SELECT * FROM places WHERE id = ?').get(placeId)
-      return httpJson(200, row)
+      return httpJson(event,200, row)
     }
 
     m = path.match(/^\/api\/plans\/([^/]+)\/places\/([^/]+)$/)
@@ -223,10 +215,10 @@ exports.main = async (event, _context) => {
       const planId = m[1]
       const placeId = m[2]
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const info = db.prepare('DELETE FROM places WHERE id = ? AND plan_id = ?').run(placeId, planId)
-      if (info.changes === 0) return httpError(404, 'Place not found')
-      return httpJson(200, { ok: true })
+      if (info.changes === 0) return httpError(event,404, 'Place not found')
+      return httpJson(event,200, { ok: true })
     }
 
     /* ---- Itinerary ---- */
@@ -234,25 +226,25 @@ exports.main = async (event, _context) => {
     if (m && method === 'GET') {
       const planId = m[1]
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const rows = db
         .prepare(
           'SELECT * FROM itinerary_items WHERE plan_id = ? ORDER BY time_slot ASC, sort_index ASC, datetime(created_at) ASC'
         )
         .all(planId)
-      return httpJson(200, rows)
+      return httpJson(event,200, rows)
     }
 
     if (m && method === 'PUT') {
       const planId = m[1]
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const placeRows = db.prepare('SELECT id FROM places WHERE plan_id = ?').all(planId)
       const placeIds = new Set(placeRows.map((r) => r.id))
       const items = Array.isArray(body.items) ? body.items : []
       for (const it of items) {
-        if (!ALLOWED_SLOTS.has(it.time_slot)) return httpError(400, `Invalid time_slot: ${it.time_slot}`)
-        if (!placeIds.has(it.place_id)) return httpError(400, `Invalid place_id: ${it.place_id}`)
+        if (!ALLOWED_SLOTS.has(it.time_slot)) return httpError(event,400, `Invalid time_slot: ${it.time_slot}`)
+        if (!placeIds.has(it.place_id)) return httpError(event,400, `Invalid place_id: ${it.place_id}`)
       }
       const t = nowIso()
       const tx = db.transaction(() => {
@@ -271,7 +263,7 @@ exports.main = async (event, _context) => {
           'SELECT * FROM itinerary_items WHERE plan_id = ? ORDER BY time_slot ASC, sort_index ASC, datetime(created_at) ASC'
         )
         .all(planId)
-      return httpJson(200, rows)
+      return httpJson(event,200, rows)
     }
 
     /* ---- Export / checks ---- */
@@ -279,16 +271,16 @@ exports.main = async (event, _context) => {
     if (m && method === 'GET') {
       const planId = m[1]
       const bundle = await loadPlanBundle(planId)
-      if (!bundle) return httpError(404, 'Plan not found')
+      if (!bundle) return httpError(event,404, 'Plan not found')
       const fmt = String(query.format || 'md').toLowerCase().trim()
-      if (fmt !== 'md' && fmt !== 'json') return httpError(400, 'format must be md or json')
+      if (fmt !== 'md' && fmt !== 'json') return httpError(event,400, 'format must be md or json')
       if (fmt === 'json') {
-        return httpJson(200, {
+        return httpJson(event,200, {
           format: 'json',
           content: buildPlanExportJson(bundle),
         })
       }
-      return httpJson(200, {
+      return httpJson(event,200, {
         format: 'md',
         content: buildPlanExportMd(bundle),
       })
@@ -298,8 +290,8 @@ exports.main = async (event, _context) => {
     if (m && method === 'GET') {
       const planId = m[1]
       const bundle = await loadPlanBundle(planId)
-      if (!bundle) return httpError(404, 'Plan not found')
-      return httpJson(200, {
+      if (!bundle) return httpError(event,404, 'Plan not found')
+      return httpJson(event,200, {
         issues: buildChecks({
           plan: bundle.plan,
           places: bundle.places,
@@ -314,11 +306,11 @@ exports.main = async (event, _context) => {
       const adcode = query.adcode
       try {
         const weather = await fetchLiveWeatherByAdcode(adcode)
-        return httpJson(200, { weather })
+        return httpJson(event,200, { weather })
       } catch (e) {
-        if (e.code === 'WEATHER_KEY') return httpError(500, e.message)
-        if (e.code === 'BAD_REQUEST') return httpError(400, e.message)
-        return httpError(502, e.message)
+        if (e.code === 'WEATHER_KEY') return httpError(event,500, e.message)
+        if (e.code === 'BAD_REQUEST') return httpError(event,400, e.message)
+        return httpError(event,502, e.message)
       }
     }
 
@@ -326,7 +318,7 @@ exports.main = async (event, _context) => {
     if (m && method === 'GET') {
       const planId = m[1]
       const planRow = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!planRow) return httpError(404, 'Plan not found')
+      if (!planRow) return httpError(event,404, 'Plan not found')
       const placeRows = db
         .prepare(
           'SELECT id, adcode FROM places WHERE plan_id = ? ORDER BY sort_index ASC, datetime(created_at) ASC'
@@ -347,7 +339,7 @@ exports.main = async (event, _context) => {
           errors[placeId] = e.message || String(e)
         }
       }
-      return httpJson(200, { weathers, errors })
+      return httpJson(event,200, { weathers, errors })
     }
 
     m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary$/)
@@ -357,7 +349,7 @@ exports.main = async (event, _context) => {
         .trim()
         .toLowerCase()
       const planRow = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-      if (!planRow) return httpError(404, 'Plan not found')
+      if (!planRow) return httpError(event,404, 'Plan not found')
       const placeRows = db
         .prepare(
           'SELECT * FROM places WHERE plan_id = ? ORDER BY sort_index ASC, datetime(created_at) ASC'
@@ -425,19 +417,19 @@ exports.main = async (event, _context) => {
       ]
       try {
         const summary = await chatComplete(messages)
-        return httpJson(200, { summary })
+        return httpJson(event,200, { summary })
       } catch (e) {
         console.error(e)
-        if (e.code === 'LLM_CONFIG') return httpError(500, e.message)
-        if (e.code === 'LLM_UPSTREAM') return httpError(502, e.message)
-        return httpError(500, e.message || 'Internal error')
+        if (e.code === 'LLM_CONFIG') return httpError(event,500, e.message)
+        if (e.code === 'LLM_UPSTREAM') return httpError(event,502, e.message)
+        return httpError(event,500, e.message || 'Internal error')
       }
     }
 
-    return httpError(404, 'Not found')
+    return httpError(event,404, 'Not found')
   } catch (e) {
     console.error(e)
-    return httpError(500, e.message || 'Internal error')
+    return httpError(event,500, e.message || 'Internal error')
   } finally {
     await flushPendingCloud()
   }

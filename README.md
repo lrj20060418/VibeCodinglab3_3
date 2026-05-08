@@ -68,7 +68,48 @@ VITE_CLOUD_PLAN_URL=https://<envId>.service.tcloudbase.com/lab3-plan
 - **前端**：配置 **`VITE_CLOUD_PLAN_URL`** 即可（天气与 AI 与 plan 同源）；**源码中不包含** LLM / 高德 Web 服务 Key；地图仅使用 `VITE_AMAP_*`（见 `frontend/.env.production.example`）。
 - **本地静态验收**：见 `frontend/README.md` 中「Lab 3-3 v2.0」：`npm run build` 后于 `dist/` 下执行 `python -m http.server`。
 
-> **未做（属 v2.1）**：静态网站托管上线、CORS 收紧到托管域名、高德 Key 白名单改为托管域等。
+## Lab 3-3 v2.1：静态托管上线 + 安全收紧（当前环境）
+
+### 公网访问地址（出行规划器）
+
+**https://vibe-lab3-3-d4gw0nadh7234883b-1429528420.tcloudbaseapp.com/**
+
+手机浏览器打开上述链接即可使用（需已配置云函数 `plan` 的 `AMAP_WEBSERVICE_KEY`、高德 JS Key 白名单含本域名，以及构建时写入的 `VITE_CLOUD_PLAN_URL`）。
+
+### 构建与部署静态站点
+
+```bash
+cd frontend
+# 生产 API 指向云函数网关（勿提交含真实高德 Key 的 .env.production）
+set VITE_CLOUD_PLAN_URL=https://vibe-lab3-3-d4gw0nadh7234883b.service.tcloudbase.com/lab3-plan
+npm run build
+```
+
+将 `frontend/dist/` 部署到 CloudBase **静态网站托管**（控制台上传或使用 CloudBase CLI / MCP `uploadFiles`，`cloudPath` 为站点根 `/`）。
+
+### CORS
+
+`plan` / `weather` / `chat` 的 `corsOrigin.js` 将 `Access-Control-Allow-Origin` 收紧为 **静态托管 Origin**（默认即上表 URL），并允许 **localhost / 127.0.0.1 任意端口** 便于本地 Vite 调试。可通过云函数环境变量 **`LAB3_HOSTING_ORIGIN`** 覆盖默认托管域名。
+
+### 高德 Web 端 Key 白名单
+
+在高德开放平台 → 应用 → **Web端(JS API) Key** → **安全设置** → **域名白名单**，添加：
+
+`vibe-lab3-3-d4gw0nadh7234883b-1429528420.tcloudbaseapp.com`
+
+（不要写 `https://` 前缀，按高德控制台要求填写主机名。）
+
+### v2.1 安全自检清单（实验报告可逐项打勾）
+
+| 项 | 说明 | 证据 |
+|----|------|------|
+| 仓库无硬编码敏感 Key | 在仓库根执行 `rg -i "sk-|Bearer |apikey|KEY=" --glob '!**/node_modules/**'` 应无真实密钥 | 自行截图检索结果 |
+| 环境文件不入库 | `.gitignore` 已忽略 `.env`、`.env.*`，仅保留 `*.env.example` | 本仓库 `.gitignore` |
+| 前端仅高德 JS Key | `frontend/src` 无 LLM / 高德 Web 服务 Key | 代码审查 / `rg` |
+| 云函数 CORS 已收紧 | 默认仅静态托管 Origin + 本机调试 | `cloudfunctions/*/corsOrigin.js` |
+| 云函数密钥在控制台 | `AMAP_WEBSERVICE_KEY`、`LLM_*` 等仅在 CloudBase 环境变量配置 | 控制台截图 |
+| 手机端全流程验证 | 首屏 + 新建规划 → 选点 → 天气 → 保存 | 自行截图 |
+| 资源监控 | 云函数调用次数、静态托管流量 | 控制台「资源监控」截图 |
 
 ## 部署提示
 

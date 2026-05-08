@@ -1,6 +1,7 @@
 'use strict'
 
 const { getDb } = require('./db')
+const { corsHeaders } = require('./corsOrigin')
 
 const CACHE = new Map()
 const TTL_MS = 10 * 60 * 1000
@@ -26,29 +27,20 @@ function getQuery(event) {
   return q && typeof q === 'object' ? q : {}
 }
 
-/** 阶段一：宽松 CORS；阶段二再收紧 Origin */
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  }
-}
-
-function httpJson(statusCode, data) {
+function httpJson(event, statusCode, data) {
   return {
     isBase64Encoded: false,
     statusCode,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      ...corsHeaders(),
+      ...corsHeaders(event),
     },
     body: JSON.stringify(data),
   }
 }
 
-function httpError(statusCode, message) {
-  return httpJson(statusCode, { detail: message })
+function httpError(event, statusCode, message) {
+  return httpJson(event, statusCode, { detail: message })
 }
 
 async function fetchLiveWeatherByAdcode(adcode) {
@@ -112,14 +104,14 @@ async function fetchLiveWeatherByAdcode(adcode) {
 exports.main = async (event, _context) => {
   const httpMethod = event.httpMethod || event.method || ''
   if (String(httpMethod).toUpperCase() === 'OPTIONS') {
-    return { statusCode: 204, headers: corsHeaders(), body: '' }
+    return { statusCode: 204, headers: corsHeaders(event), body: '' }
   }
 
   const method = String(httpMethod || 'GET').toUpperCase()
   const path = normalizePath(event)
 
   if (path === '/health' && method === 'GET') {
-    return httpJson(200, { ok: true })
+    return httpJson(event,200, { ok: true })
   }
 
   try {
@@ -128,11 +120,11 @@ exports.main = async (event, _context) => {
       const adcode = query.adcode
       try {
         const weather = await fetchLiveWeatherByAdcode(adcode)
-        return httpJson(200, { weather })
+        return httpJson(event,200, { weather })
       } catch (e) {
-        if (e.code === 'WEATHER_KEY') return httpError(500, e.message)
-        if (e.code === 'BAD_REQUEST') return httpError(400, e.message)
-        return httpError(502, e.message)
+        if (e.code === 'WEATHER_KEY') return httpError(event,500, e.message)
+        if (e.code === 'BAD_REQUEST') return httpError(event,400, e.message)
+        return httpError(event,502, e.message)
       }
     }
 
@@ -141,7 +133,7 @@ exports.main = async (event, _context) => {
       const planId = m[1]
       const db = await getDb()
       const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
-      if (!plan) return httpError(404, 'Plan not found')
+      if (!plan) return httpError(event,404, 'Plan not found')
       const rows = db
         .prepare(
           'SELECT id, adcode FROM places WHERE plan_id = ? ORDER BY sort_index ASC, datetime(created_at) ASC'
@@ -162,12 +154,12 @@ exports.main = async (event, _context) => {
           errors[placeId] = e.message || String(e)
         }
       }
-      return httpJson(200, { weathers, errors })
+      return httpJson(event,200, { weathers, errors })
     }
 
-    return httpError(404, 'Not found')
+    return httpError(event,404, 'Not found')
   } catch (e) {
     console.error(e)
-    return httpError(500, e.message || 'Internal error')
+    return httpError(event,500, e.message || 'Internal error')
   }
 }
