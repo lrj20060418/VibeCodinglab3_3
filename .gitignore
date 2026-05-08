@@ -1,0 +1,35 @@
+# Node
+node_modules/
+cloudfunctions/**/node_modules/
+dist/
+.vite/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local env (do not commit)
+.env
+.env.*
+!.env.example
+!**/.env.example
+!**/.env.local.example
+!**/.env.production.example
+!**/.env.development.example
+backend/.env
+backend/app.db
+frontend/.env.local
+frontend/.env.*.local
+
+# Cursor / Skills（体积大，不纳入课程仓库）
+.agents/
+skills-lock.json
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

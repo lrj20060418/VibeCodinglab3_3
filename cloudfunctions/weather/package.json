@@ -1,0 +1,12 @@
+{
+  "name": "lab3-weather",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}
