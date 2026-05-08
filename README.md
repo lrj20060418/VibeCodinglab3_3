@@ -135,7 +135,23 @@ npm run build
 ### CI/CD（GitHub Actions）
 
 - 工作流：`.github/workflows/deploy-cloudbase.yml`，在 **push 到 `master` 或 `main`** 时：`npm ci` + `npm run build`（前端），再 `tcb login --apiKeyId … --apiKey …`、`tcb fn deploy plan --force`、`tcb hosting deploy frontend/dist -e <envId>`。
-- 需在 GitHub **Actions secrets** 配置：`TCB_API_KEY_ID`、`TCB_API_KEY`、`TCB_ENV_ID`、`VITE_CLOUD_PLAN_URL`，以及构建所需的高德 `VITE_AMAP_*`（与生产构建一致）。密钥获取见 CloudBase 文档 [Using in the CI Environment](https://docs.cloudbase.net/en/framework/ci)。
+- 需在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 中新增下列 **Name** 与取值（文档里已写全名；此前仅列清单，下面补「到哪看」）。
+
+#### GitHub Actions 里各 Secret 从哪看？
+
+| Secret 名称 | 是什么 | 在哪查看 / 怎么填 |
+|-------------|--------|-------------------|
+| **`TCB_ENV_ID`** | 云开发环境 ID，与根目录 **`cloudbaserc.json`** 里的 **`envId`** 必须一致 | 打开本仓库 `cloudbaserc.json` 复制 `envId`；或在 [云开发控制台](https://tcb.cloud.tencent.com/) 左上角/环境列表里看到的 **环境 ID**（形如 `xxx-数字`） |
+| **`TCB_API_KEY_ID`** | 腾讯云 **SecretId**（CLI 参数名叫 `apiKeyId`） | [访问管理 → 访问密钥 → API 密钥管理](https://console.cloud.tencent.com/cam/capi) → 使用已有密钥或「新建密钥」→ 复制 **SecretId** 填到本项（勿提交到 Git） |
+| **`TCB_API_KEY`** | 腾讯云 **SecretKey**（与上条同一组密钥） | 同上页复制 **SecretKey**（仅创建时完整显示一次，请自行安全保存）。该主账号或子用户需具备云开发/云函数/静态托管等相关权限 |
+| **`VITE_CLOUD_PLAN_URL`** | 前端构建时写入的 **plan 云函数 HTTP 网关 Base URL**（无末尾 `/`） | [云开发控制台](https://tcb.cloud.tencent.com/) → 你的环境 → **云函数** → **`plan`** → **HTTP 访问**（或「云函数网关」）→ 查看 **默认域名 + 路径前缀**，拼成 `https://<envId>.service.tcloudbase.com/<前缀>`（具体以控制台为准，与 README 前文「前端如何走公网云函数」示例一致） |
+| **`VITE_AMAP_KEY`** | 高德 **Web 端（JS API）** Key | [高德开放平台](https://console.amap.com/) → 应用 → 选择/创建应用 → **Key** 列表里类型为 **Web端(JS API)** 的 Key |
+| **`VITE_AMAP_SECURITY_JS_CODE`** | 与上一条 Key 配套的 **安全密钥**（控制台里「安全密钥 / jscode」） | 同上高德控制台该 Key 的 **安全设置** 中查看；与本地 `frontend/.env.production` 里用于打包的值相同 |
+
+补充说明：
+
+- **`TCB_API_KEY_ID` / `TCB_API_KEY`**：与 CloudBase 文档里 `tcb login --apiKeyId … --apiKey …` 对应，一般即 **腾讯云 CAM 的 SecretId / SecretKey**；若你使用子用户，请在 CAM 为该子用户勾选云开发/SCF 等权限。官方 CI 说明仍见：[Using in the CI Environment](https://docs.cloudbase.net/en/framework/ci)。
+- **`VITE_*`**：只在 **GitHub 构建前端** 时需要；与你在本机打包上线时 `frontend/.env.production` 里填的 **一致即可**（不要把含真实 Key 的 `.env.production` 提交进仓库）。
 
 ## 部署提示
 
