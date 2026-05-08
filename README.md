@@ -153,6 +153,16 @@ npm run build
 - **`TCB_API_KEY_ID` / `TCB_API_KEY`**：与 CloudBase 文档里 `tcb login --apiKeyId … --apiKey …` 对应，一般即 **腾讯云 CAM 的 SecretId / SecretKey**；若你使用子用户，请在 CAM 为该子用户勾选云开发/SCF 等权限。官方 CI 说明仍见：[Using in the CI Environment](https://docs.cloudbase.net/en/framework/ci)。
 - **`VITE_*`**：只在 **GitHub 构建前端** 时需要；与你在本机打包上线时 `frontend/.env.production` 里填的 **一致即可**（不要把含真实 Key 的 `.env.production` 提交进仓库）。
 
+#### 我不知道「具体值」是什么，还能不能填？
+
+这 6 项**没有全班共用的标准答案**，都来自**你自己的**云环境 / 腾讯云账号 / 高德应用。可以按下面对照准备（能填几项就先填几项）：
+
+1. **`TCB_ENV_ID`**：打开本仓库根目录的 **`cloudbaserc.json`**，把里面的 **`"envId"`** 整段复制到 GitHub Secret（例如当前示例为 `vibe-lab3-3-d4gw0nadh7234883b`，**以你文件里为准**）。这是环境标识，**不是**登录密码。
+2. **`TCB_API_KEY_ID` / `TCB_API_KEY`**：用已开通云开发的同一腾讯云账号登录 [API 密钥管理](https://console.cloud.tencent.com/cam/capi) → **新建密钥**（或沿用已有）→ 页面上 **SecretId** → 填 `TCB_API_KEY_ID`；**SecretKey** → 填 `TCB_API_KEY`。**SecretKey 只在创建时出现一次**，需自己复制保存；它与高德 Key **无关**。若从未用过腾讯云，需先注册并完成实名认证。
+3. **`VITE_CLOUD_PLAN_URL`**：在云开发控制台为 **`plan`** 已创建 **HTTP 访问** 的前提下，把控制台显示的访问地址（默认域名 + 路径前缀）拼成 **`https://...service.tcloudbase.com/你的前缀`**，**不要末尾 `/`**。若你本机曾经成功打过线上包，打开 **`frontend/.env.production`**（勿提交 Git）里 **`VITE_CLOUD_PLAN_URL=`** 后面的内容，**原样**填到 GitHub Secret。
+4. **`VITE_AMAP_KEY` / `VITE_AMAP_SECURITY_JS_CODE`**：在 [高德控制台](https://console.amap.com/) 找到本项目的 **Web端(JS API)** Key 与 **安全密钥**，与 `.env.production` 里两项**完全一致**。
+5. **若暂时不想配 GitHub Actions**：可以不建这些 Secret，照旧在本机 **`npm run build`** 后手动/MCP 上传 **`frontend/dist`**；CI 只是可选自动化。
+
 ## 部署提示
 
 1. 根目录 `cloudbaserc.json` 中 `envId` 需与你的环境一致（当前示例已为绑定环境）。
