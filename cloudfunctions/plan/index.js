@@ -1,7 +1,13 @@
 'use strict'
 
 const { randomUUID } = require('crypto')
-const { getDb, flushPendingCloud } = require('./db')
+const {
+  getDb,
+  flushPendingCloud,
+  preparePlanDbForRequest,
+  reloadDbFromCloudOnceAfterMiss,
+} = require('./db')
+const { isCloudFunctionRuntime } = require('./cloudSqlite')
 const { fetchLiveWeatherByAdcode } = require('./amapWeather')
 const { chatComplete } = require('./llm')
 const { buildChecks } = require('./checks')
@@ -52,6 +58,8 @@ function httpJson(event, statusCode, data) {
     statusCode,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
       ...corsHeaders(event),
     },
     body: JSON.stringify(data),
@@ -90,7 +98,7 @@ async function loadPlanBundle(planId) {
   return { plan, places, itinerary, weatherByPlace }
 }
 
-exports.main = async (event, _context) => {
+exports.main = async (event, context) => {
   const httpMethod = event.httpMethod || event.method || ''
   if (String(httpMethod).toUpperCase() === 'OPTIONS') {
     return { statusCode: 204, headers: corsHeaders(event), body: '' }
@@ -103,14 +111,44 @@ exports.main = async (event, _context) => {
     return httpJson(event,200, { ok: true })
   }
 
-  const db = await getDb()
+  await preparePlanDbForRequest()
+
+  let db = await getDb()
   const body = parseBody(event)
   const query = getQuery(event)
 
   try {
+    let planMissHealDone = false
+    let listEmptyHealAttempted = false
+
+    async function withDbAfterPlanMissRetry(planId, readFn) {
+      let row = readFn(db)
+      if (row) return row
+      if (planMissHealDone) return null
+      planMissHealDone = true
+      await reloadDbFromCloudOnceAfterMiss()
+      db = await getDb()
+      return readFn(db)
+    }
+
+    async function loadPlanBundleWithHeal(planId) {
+      let b = await loadPlanBundle(planId)
+      if (b) return b
+      if (planMissHealDone) return null
+      planMissHealDone = true
+      await reloadDbFromCloudOnceAfterMiss()
+      return loadPlanBundle(planId)
+    }
+
     /* ---- Plans ---- */
     if (path === '/api/plans' && method === 'GET') {
-      const rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
+      let rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
+      if (rows.length === 0 && isCloudFunctionRuntime() && !listEmptyHealAttempted) {
+        listEmptyHealAttempted = true
+        await reloadDbFromCloudOnceAfterMiss()
+        db = await getDb()
+        rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
+      }
       return httpJson(event,200, rows)
     }
 
@@ -132,20 +170,25 @@ exports.main = async (event, _context) => {
         t
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(id)
+      await flushPendingCloud()
       return httpJson(event,200, row)
     }
 
     let m = path.match(/^\/api\/plans\/([^/]+)$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      const row = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      )
       if (!row) return httpError(event,404, 'Plan not found')
       return httpJson(event,200, row)
     }
 
     if (m && method === 'PUT') {
       const planId = m[1]
-      const cur = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      const cur = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      )
       if (!cur) return httpError(event,404, 'Plan not found')
       const merged = {
         ...cur,
@@ -168,6 +211,7 @@ exports.main = async (event, _context) => {
         planId
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      await flushPendingCloud()
       return httpJson(event,200, row)
     }
 
@@ -175,7 +219,9 @@ exports.main = async (event, _context) => {
     m = path.match(/^\/api\/plans\/([^/]+)\/places$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const plan = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!plan) return httpError(event,404, 'Plan not found')
       const rows = db
         .prepare(
@@ -187,7 +233,9 @@ exports.main = async (event, _context) => {
 
     if (m && method === 'POST') {
       const planId = m[1]
-      const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const plan = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!plan) return httpError(event,404, 'Plan not found')
       const placeId = randomUUID()
       const t = nowIso()
@@ -207,6 +255,7 @@ exports.main = async (event, _context) => {
         t
       )
       const row = db.prepare('SELECT * FROM places WHERE id = ?').get(placeId)
+      await flushPendingCloud()
       return httpJson(event,200, row)
     }
 
@@ -214,10 +263,13 @@ exports.main = async (event, _context) => {
     if (m && method === 'DELETE') {
       const planId = m[1]
       const placeId = m[2]
-      const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const plan = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!plan) return httpError(event,404, 'Plan not found')
       const info = db.prepare('DELETE FROM places WHERE id = ? AND plan_id = ?').run(placeId, planId)
       if (info.changes === 0) return httpError(event,404, 'Place not found')
+      await flushPendingCloud()
       return httpJson(event,200, { ok: true })
     }
 
@@ -225,7 +277,9 @@ exports.main = async (event, _context) => {
     m = path.match(/^\/api\/plans\/([^/]+)\/itinerary$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const plan = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!plan) return httpError(event,404, 'Plan not found')
       const rows = db
         .prepare(
@@ -237,7 +291,9 @@ exports.main = async (event, _context) => {
 
     if (m && method === 'PUT') {
       const planId = m[1]
-      const plan = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const plan = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!plan) return httpError(event,404, 'Plan not found')
       const placeRows = db.prepare('SELECT id FROM places WHERE plan_id = ?').all(planId)
       const placeIds = new Set(placeRows.map((r) => r.id))
@@ -263,6 +319,7 @@ exports.main = async (event, _context) => {
           'SELECT * FROM itinerary_items WHERE plan_id = ? ORDER BY time_slot ASC, sort_index ASC, datetime(created_at) ASC'
         )
         .all(planId)
+      await flushPendingCloud()
       return httpJson(event,200, rows)
     }
 
@@ -270,7 +327,7 @@ exports.main = async (event, _context) => {
     m = path.match(/^\/api\/plans\/([^/]+)\/export$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const bundle = await loadPlanBundle(planId)
+      const bundle = await loadPlanBundleWithHeal(planId)
       if (!bundle) return httpError(event,404, 'Plan not found')
       const fmt = String(query.format || 'md').toLowerCase().trim()
       if (fmt !== 'md' && fmt !== 'json') return httpError(event,400, 'format must be md or json')
@@ -289,7 +346,7 @@ exports.main = async (event, _context) => {
     m = path.match(/^\/api\/plans\/([^/]+)\/checks$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const bundle = await loadPlanBundle(planId)
+      const bundle = await loadPlanBundleWithHeal(planId)
       if (!bundle) return httpError(event,404, 'Plan not found')
       return httpJson(event,200, {
         issues: buildChecks({
@@ -317,7 +374,9 @@ exports.main = async (event, _context) => {
     m = path.match(/^\/api\/plans\/([^/]+)\/weather\/live$/)
     if (m && method === 'GET') {
       const planId = m[1]
-      const planRow = db.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      const planRow = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
+      )
       if (!planRow) return httpError(event,404, 'Plan not found')
       const placeRows = db
         .prepare(
@@ -348,7 +407,9 @@ exports.main = async (event, _context) => {
       const style = String(body.style || 'normal')
         .trim()
         .toLowerCase()
-      const planRow = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      const planRow = await withDbAfterPlanMissRetry(planId, (d) =>
+        d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
+      )
       if (!planRow) return httpError(event,404, 'Plan not found')
       const placeRows = db
         .prepare(
@@ -434,3 +495,4 @@ exports.main = async (event, _context) => {
     await flushPendingCloud()
   }
 }
+

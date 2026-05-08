@@ -3,7 +3,11 @@
 function requireEnv(name) {
   const v = String(process.env[name] || '').trim()
   if (!v) {
-    const err = new Error(`${name} is not set`)
+    const hint =
+      name === 'LLM_API_KEY' || name === 'LLM_BASE_URL' || name === 'LLM_MODEL'
+        ? '（请在 CloudBase 控制台 → 云函数「plan」→ 环境变量 中配置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL；AI 摘要路由在 plan 上，不要只配在「chat」云函数。）'
+        : ''
+    const err = new Error(`${name} is not set${hint}`)
     err.code = 'LLM_CONFIG'
     throw err
   }
