@@ -130,7 +130,7 @@ npm run build
 
 - 网关路由：**`GET /api/plans/:planId/ai/summary/stream?style=normal`**（`style` 同 POST）。
 - 响应：`Content-Type: text/event-stream`，正文为 SSE：`data: {"delta":"..."}` 增量；结束为 `data: {"done":true}`；业务错误为自定义事件 **`summaryerror`**（仍 200，便于 EventSource 解析）。
-- **说明**：云函数 HTTP 一般为**整包返回**网关后再送达浏览器，与长连接真·逐包推送有差异；浏览器也可能在同一轮事件里连续处理多条 SSE。前端在 `frontend/src/api/ai.js` 内用 **缓冲 + `requestAnimationFrame` 分帧**调用 `onDelta`，在整包到达时仍能呈现**可见的「打字」式输出**（与真·网络流式不同，属体验补偿）。未配置 `VITE_CLOUD_PLAN_URL`（本地走 Vite 代理）时，会**自动回退**为 `POST /ai/summary`，并对整段结果做同样的分帧展示。
+- **说明**：云函数 HTTP 一般为**整包返回**，真·逐字网络流式受限。前端在 `frontend/src/api/ai.js` 用 **`fetch` + `ReadableStream` 读 SSE**（较 `EventSource` 更易按 body 分块处理），并用 **定时器小步（约每 26ms 刷 4 字）**调用 `onDelta`，保证肉眼可见的「打字」效果；未收到 `done` 或失败时回退 **`POST /ai/summary`** 并同样分步展示。未配置 `VITE_CLOUD_PLAN_URL` 时仅走 POST。
 
 ### CI/CD（GitHub Actions）
 
