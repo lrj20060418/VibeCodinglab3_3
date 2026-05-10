@@ -1,5 +1,7 @@
 # Lab 3-3 阶段一：项目结构 + 云函数后端（Node）
 
+**公网访问（静态托管）**：https://vibe-lab3-3-d4gw0nadh7234883b-1429528420.tcloudbaseapp.com/
+
 本仓库在 Lab 3-2（`frontend/` Vue + `backend/` FastAPI）基础上，增加 **CloudBase 云函数** 形态的后端，目录符合实验要求。
 
 ## 目录说明
@@ -122,7 +124,7 @@ npm run build
 
 ## Lab 3-3 v2.2：云 SQLite 快照 + 内置大模型 + 跨端/响应式 + CI/CD
 
-实验报告级说明见 **`docs/v2.2-summary.md`**（选型、设计、与 AI 协作偏差与修正、与 v2.1 兼容）。
+课程实验报告（含 §5–§7 对应内容、提交清单、总结四问）见 **`docs/lab3-3-experiment-report.md`**。
 
 ### 内置大模型（与 v2.1 兼容）
 
