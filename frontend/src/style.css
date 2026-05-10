@@ -1,18 +1,25 @@
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* 智能出行规划器 · 参考 UI 紫系 */
+  --text: #666666;
+  --text-h: #333333;
+  --bg: #f8f9fb;
+  --border: #e8e4f0;
+  --code-bg: #f0eeff;
+  --accent: #6347d1;
+  --accent-soft: #ffb088;
+  --accent-bg: rgba(99, 71, 209, 0.12);
+  --accent-border: rgba(99, 71, 209, 0.42);
+  --social-bg: rgba(255, 255, 255, 0.92);
+  --shadow: 0 10px 30px -10px rgba(99, 71, 209, 0.12);
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.05);
+  --radius-lg: 16px;
+  --radius-btn: 14px;
+  --card-surface: #ffffff;
+  --input-surface: #ffffff;
+  --map-placeholder: #f4f6f8;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --sans: system-ui, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
+  --heading: system-ui, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
   font: 18px/145% var(--sans);
@@ -32,17 +39,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+    --text: #b4abc8;
+    --text-h: #f2effa;
+    --bg: #1a1628;
+    --border: #322d45;
+    --code-bg: #252038;
+    --accent: #9b84eb;
+    --accent-soft: #e8a080;
+    --accent-bg: rgba(155, 132, 235, 0.18);
+    --accent-border: rgba(155, 132, 235, 0.55);
+    --social-bg: rgba(30, 26, 45, 0.85);
+    --shadow: 0 12px 36px -12px rgba(0, 0, 0, 0.45);
+    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.35);
+    --card-surface: #221e32;
+    --input-surface: #2a2540;
+    --map-placeholder: #1c1a26;
   }
 
   #social .button-icon {

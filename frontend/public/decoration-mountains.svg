@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320" fill="none" aria-hidden="true">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9B84EB"/>
+      <stop offset="100%" stop-color="#6347D1"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#B8A8F0"/>
+      <stop offset="100%" stop-color="#7B63D8"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#C4B6F5"/>
+      <stop offset="100%" stop-color="#8E7AE0"/>
+    </linearGradient>
+  </defs>
+  <!-- ÜqB -->
+  <path d="M0 200 L140 95 L260 165 L400 70 L520 145 L640 88 L640 320 L0 320 Z" fill="url(#g1)" opacity="0.22"/>
+  <path d="M0 230 L100 140 L220 210 L380 115 L500 195 L640 130 L640 320 L0 320 Z" fill="url(#g2)" opacity="0.28"/>
+  <!-- Ñq -->
+  <path d="M0 280 L80 190 L200 250 L360 160 L480 235 L560 200 L640 215 L640 320 L0 320 Z" fill="url(#g3)" opacity="0.38"/>
+  <!-- 4b—: -->
+  <rect x="0" y="288" width="640" height="32" fill="#6347D1" opacity="0.06"/>
+</svg>
