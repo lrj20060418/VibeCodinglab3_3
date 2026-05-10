@@ -8,7 +8,7 @@
 project/
 ├── frontend/                 # Lab 3-2 前端（Vue 3 + Vite），沿用
 ├── cloudfunctions/
-│   ├── plan/                 # 规划 + 同库天气/AI：…、POST /api/plans/:id/ai/summary、GET /api/plans/:id/ai/summary/stream（SSE）
+│   ├── plan/                 # 规划 + 同库天气/AI：…、POST /api/plans/:id/ai/summary；可选 GET …/ai/summary/stream（SSE，前端当前走 POST 非流式）
 │   ├── weather/              # 可选独立部署（与 plan 的 /tmp 不共享，线上请优先走 plan 路由）
 │   └── chat/                 # 可选独立部署（同上）
 ├── .cursor/
@@ -26,7 +26,7 @@ project/
 
 | 云函数 | 职责 | 主要路径 |
 |--------|------|----------|
-| `plan` | SQLite CRUD、行程、导出、规则检查、**高德天气**、**AI 摘要**（内置混元/DeepSeek 或外部 LLM；流式 SSE） | `/api/plans...`、`/api/weather/live`、`/api/plans/:id/weather/live`、`POST /api/plans/:id/ai/summary`、`GET /api/plans/:id/ai/summary/stream`、`/health` |
+| `plan` | SQLite CRUD、行程、导出、规则检查、**高德天气**、**AI 摘要**（内置混元/DeepSeek 或外部 LLM；**前端默认 POST 非流式**；网关侧仍可提供 **GET …/stream** 供扩展） | `/api/plans...`、`/api/weather/live`、`/api/plans/:id/weather/live`、`POST /api/plans/:id/ai/summary`、`GET /api/plans/:id/ai/summary/stream`、`/health` |
 | `weather` | 仅保留兼容；各函数 `/tmp` 隔离，**勿**把「按规划拉天气」指到本函数 | 同左路径若部署在 plan 上 |
 | `chat` | 仅保留兼容；**AI 摘要**请在控制台为 **plan** 配置 `LLM_*` | 同左 |
 
@@ -95,7 +95,7 @@ npm run build
 
 ### CORS
 
-`plan` / `weather` / `chat` 的 `corsOrigin.js` 将 `Access-Control-Allow-Origin` 设为 **`LAB3_HOSTING_ORIGIN`（或内置默认）与请求 `Origin` 一致时回显**，并额外允许 **`https://*.tcloudbaseapp.com`**（静态托管子域随环境会变，**EventSource** 跨网关访问云函数时必须回显真实 Origin）。仍允许 **localhost / 127.0.0.1 任意端口** 便于本地 Vite。自定义域名请设置 **`LAB3_HOSTING_ORIGIN`** 为实际站点 **完整 Origin**（含 `https://`），否则浏览器会拦截跨域，表现为「加载不出」或 **SSE 连接中断**。
+`plan` / `weather` / `chat` 的 `corsOrigin.js` 将 `Access-Control-Allow-Origin` 设为 **`LAB3_HOSTING_ORIGIN`（或内置默认）与请求 `Origin` 一致时回显**，并额外允许 **`https://*.tcloudbaseapp.com`**（静态托管子域随环境会变；若使用 **SSE / EventSource** 跨网关访问云函数，同样需要回显真实 Origin）。仍允许 **localhost / 127.0.0.1 任意端口** 便于本地 Vite。自定义域名请设置 **`LAB3_HOSTING_ORIGIN`** 为实际站点 **完整 Origin**（含 `https://`），否则浏览器会拦截跨域，表现为「加载不出」或 **流式连接中断**。
 
 ### 高德 Web 端 Key 白名单
 
@@ -120,7 +120,9 @@ npm run build
 若课程要求 Git 提交说明为中文而本机 `git commit -m` 出现乱码，可在仓库根执行：  
 `git commit --amend -m "feat: v2.1 前端部署至 CloudBase 静态托管，全链路上线"` 后 `git push --force-with-lease`（仅当你确定要覆盖远端该条提交时）。
 
-## Lab 3-3 v2.2：内置大模型 + SSE 流式 + GitHub Actions 部署
+## Lab 3-3 v2.2：云 SQLite 快照 + 内置大模型 + 跨端/响应式 + CI/CD
+
+实验报告级说明见 **`docs/v2.2-summary.md`**（选型、设计、与 AI 协作偏差与修正、与 v2.1 兼容）。
 
 ### 内置大模型（与 v2.1 兼容）
 
@@ -128,10 +130,15 @@ npm run build
 - **仍用外部 Key**：照常配置 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，或显式 `LAB3_AI_BACKEND=external`。
 - **模型切换**：`LAB3_CLOUD_AI_PROVIDER=deepseek` 或 `LAB3_CLOUD_AI_MODEL=deepseek-v3.2` 等（见 `.env.example`）；默认混元 `hunyuan-2.0-instruct-20251111`。
 
-### AI 总结（POST 为主；云函数仍保留 SSE 路由）
+### AI 摘要（当前前端：POST 非流式）
 
-- **当前前端默认**：**`POST /api/plans/:planId/ai/summary`**（`frontend/src/api/ai.js` 的 `generatePlanSummary`），简单稳定、与网关/CORS 兼容性好。
-- **流式（可选）**：网关仍提供 **`GET /api/plans/:planId/ai/summary/stream?style=normal`**，`Content-Type: text/event-stream`，SSE `data: {"delta":"..."}` / `{"done":true}`，错误事件 **`summaryerror`**。需要时可在前端自行接 `fetch`+流式解析；未配置 `VITE_CLOUD_PLAN_URL` 时本地开发仅走 POST。
+- **`POST /api/plans/:planId/ai/summary`**：一次返回 JSON `{ summary }`；`frontend/src/api/ai.js` 与 `PlanPage.vue` 使用该路径，**与 v2.1 的「点按钮出摘要」体验一致**，并规避部分环境下网关缓冲、CORS 与流式解析成本。
+
+### 可选：流式 AI（SSE，网关侧）
+
+- 网关路由：**`GET /api/plans/:planId/ai/summary/stream?style=normal`**（`style` 同 POST）。
+- 响应：`Content-Type: text/event-stream`，正文为 SSE：`data: {"delta":"..."}` 增量；结束为 `data: {"done":true}`；业务错误可为自定义事件 **`summaryerror`**（仍 200，便于 EventSource 解析）。
+- **说明**：云函数 HTTP 在部分链路上为**整包返回**，真·逐字网络流式依赖网关与客户端配合；若要在前端恢复「打字机」效果，可再接 **`fetch` + `ReadableStream` 或 `EventSource`** 消费本路由。
 
 ### CI/CD（GitHub Actions）
 
@@ -169,7 +176,7 @@ npm run build
 1. 根目录 `cloudbaserc.json` 中 `envId` 需与你的环境一致（当前示例已为绑定环境）。
 2. 在 CloudBase 控制台为 **`plan`** 配置 **`AMAP_WEBSERVICE_KEY`**（须为高德控制台 **[Web服务] 类型** 的 Key；若误用 **Web端(JS API)** Key 会返回 `USERKEY_PLAT_NOMATCH`）。**大模型（v2.2）**：未配置 **`LLM_API_KEY`** 时默认走 **CloudBase 内置**混元/DeepSeek（`@cloudbase/node-sdk` ≥3.16 的 `ai().createModel().generateText` / `streamText`），**无需自建 Key**；若仍用外部 OpenAI 兼容接口，请配置 **`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`** 或设置 **`LAB3_AI_BACKEND=external`**。可选 **`LAB3_CLOUD_AI_PROVIDER`**（`hunyuan`/`deepseek`）与 **`LAB3_CLOUD_AI_MODEL`** 覆盖默认模型名。`weather` / `chat` 若仍单独部署，可按需配置。
 3. 使用 CloudBase CLI / 控制台上传云函数；至少为 **`plan`** 开启 **HTTP 访问**（如 `/lab3-plan`），路径需能转发到函数内识别的 `/api/...`（与 Lab 3-2 相同路径最省事）。
-4. **数据库**：当前 **`plan`** 使用 **SQLite**（默认 `os.tmpdir()/lab3-cloudfunctions/app.db`）。多实例下仍为进程内临时存储，实验可用；生产建议改为云数据库。
+4. **数据库**：业务逻辑仍用 **sql.js 内存 SQLite**；**v2.2** 将整库快照同步到文档型集合 **`lab3_plan_sqlite`**（见上文「必建集合」），云函数冷启动或多实例间以云端为一致来源，**服务重启不丢规划**；未开通文档库或本地禁用时仍可在单实例内运行。
 
 ## 依赖安装（本地校验云函数代码）
 
