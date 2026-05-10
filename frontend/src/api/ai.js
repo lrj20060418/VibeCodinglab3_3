@@ -2,8 +2,9 @@ import { planApiBase } from './config'
 
 const API_BASE = planApiBase()
 
-/** 每帧最多追加字符数（云函数整包返回时仍能看出「打字」效果） */
-const STREAM_CHARS_PER_FRAME = 28
+/** 打字机：每步字符数 / 间隔（毫秒）——略放慢以便肉眼看出「流式」 */
+const STREAM_CHUNK_SIZE = 4
+const STREAM_INTERVAL_MS = 26
 
 async function http(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -34,15 +35,22 @@ export function generatePlanSummary(planId, style = 'normal') {
 }
 
 /**
- * 将上游可能「整包到达」的文本，按帧拆成多次 onDelta，避免 Vue 合并成一次渲染。
+ * 将整段或大块文本拆成多次 onDelta，用定时器拉开间隔（云函数常整包返回 SSE）。
  */
 function createSmoothStream(onDelta) {
   let buf = ''
-  let raf = null
+  let timer = null
   let drainResolve = null
 
-  function pump() {
-    raf = null
+  function clearTimer() {
+    if (timer != null) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  function tick() {
+    timer = null
     if (buf.length === 0) {
       if (drainResolve) {
         const r = drainResolve
@@ -51,7 +59,7 @@ function createSmoothStream(onDelta) {
       }
       return
     }
-    const take = Math.min(STREAM_CHARS_PER_FRAME, buf.length)
+    const take = Math.min(STREAM_CHUNK_SIZE, buf.length)
     onDelta?.(buf.slice(0, take))
     buf = buf.slice(take)
     if (buf.length === 0) {
@@ -62,29 +70,25 @@ function createSmoothStream(onDelta) {
       }
       return
     }
-    raf = requestAnimationFrame(pump)
+    timer = setTimeout(tick, STREAM_INTERVAL_MS)
   }
 
   function push(s) {
     if (!s) return
     buf += s
-    if (raf == null) raf = requestAnimationFrame(pump)
+    if (timer == null) timer = setTimeout(tick, STREAM_INTERVAL_MS)
   }
 
-  /** 等待缓冲区全部显示完（用于 done 前收尾） */
   function waitDrained() {
-    if (buf.length === 0 && raf == null) return Promise.resolve()
+    if (buf.length === 0 && timer == null) return Promise.resolve()
     return new Promise((resolve) => {
       drainResolve = resolve
-      if (raf == null) pump()
+      if (timer == null) tick()
     })
   }
 
   function cancel() {
-    if (raf != null) {
-      cancelAnimationFrame(raf)
-      raf = null
-    }
+    clearTimer()
     buf = ''
     if (drainResolve) {
       const r = drainResolve
@@ -97,61 +101,120 @@ function createSmoothStream(onDelta) {
 }
 
 /**
- * 流式 AI 总结：优先 `GET .../ai/summary/stream` + EventSource（增量 `onDelta`）。
- * 未配置 `VITE_CLOUD_PLAN_URL` 时回退为 POST 非流式（与本地 Vite 代理行为一致）。
- *
- * 网关/云函数常一次性返回整段 SSE，浏览器会在同一轮里连续触发 onmessage；此处用 rAF
- * 分帧刷字，避免界面「一整块出现」。
+ * 解析一段 SSE（以 \\n\\n 分隔的 block）
+ * @returns {'done'|'error'|false}
+ */
+function handleSseBlock(block, smooth, onError) {
+  const lines = block.split('\n')
+  let eventName = 'message'
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '')
+    if (!line || line.startsWith(':')) continue
+    if (line.startsWith('event:')) {
+      eventName = line.slice(6).trim()
+      continue
+    }
+    if (line.startsWith('data:')) {
+      const payload = line.slice(5).trimStart()
+      try {
+        const p = JSON.parse(payload)
+        if (eventName === 'summaryerror') {
+          onError(new Error(String(p.detail || 'AI 总结失败')))
+          return 'error'
+        }
+        if (p.delta) smooth.push(p.delta)
+        if (p.done) return 'done'
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * fetch + ReadableStream 读取 SSE（比 EventSource 更易按 TCP 分块处理 body）
+ * @returns {Promise<boolean>} true = 已正常结束（含 done）
+ */
+/** @returns {Promise<boolean>} true = 收到 done 并已 drain */
+async function readSseStreamWithFetch(url, smooth, onError) {
+  let res
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream' },
+      credentials: 'omit',
+      mode: 'cors',
+    })
+  } catch (e) {
+    onError(e instanceof Error ? e : new Error(String(e)))
+    return false
+  }
+
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const t = await res.text()
+      const j = JSON.parse(t)
+      if (j.detail) msg = j.detail
+    } catch {
+      /* keep */
+    }
+    onError(new Error(msg))
+    return false
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) {
+    onError(new Error('响应无 body'))
+    return false
+  }
+
+  const dec = new TextDecoder()
+  let carry = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    carry += dec.decode(value, { stream: true })
+    let sep
+    while ((sep = carry.indexOf('\n\n')) >= 0) {
+      const block = carry.slice(0, sep)
+      carry = carry.slice(sep + 2)
+      const r = handleSseBlock(block, smooth, onError)
+      if (r === 'error') return false
+      if (r === 'done') {
+        await smooth.waitDrained()
+        return true
+      }
+    }
+  }
+
+  if (carry.trim()) {
+    const r = handleSseBlock(carry, smooth, onError)
+    if (r === 'error') return false
+    if (r === 'done') {
+      await smooth.waitDrained()
+      return true
+    }
+  }
+
+  return false
+}
+
+/**
+ * 流式 AI 总结：优先 fetch 读 SSE + 打字机；未收到 done 或失败则 POST。
  */
 export function streamPlanSummary(planId, style = 'normal', handlers = {}) {
   const { onDelta, onDone, onError } = handlers
   const base = planApiBase()
 
   return new Promise((resolve, reject) => {
-    if (!base) {
-      const smooth = createSmoothStream(onDelta)
-      generatePlanSummary(planId, style)
-        .then(async (res) => {
-          const text = res.summary || ''
-          if (text) smooth.push(text)
-          await smooth.waitDrained()
-          smooth.cancel()
-          onDone?.()
-          resolve()
-        })
-        .catch((e) => {
-          onError?.(e)
-          reject(e)
-        })
-      return
-    }
-
-    const url = `${base}/api/plans/${encodeURIComponent(planId)}/ai/summary/stream?style=${encodeURIComponent(style)}`
-    const es = new EventSource(url)
-    let finished = false
-    let gotStreamData = false
-    let fallbackLatch = false
-    let failTimer = null
     let settled = false
-    const smooth = createSmoothStream(onDelta)
-
-    const clearFailTimer = () => {
-      if (failTimer != null) {
-        clearTimeout(failTimer)
-        failTimer = null
-      }
-    }
 
     const settleOk = () => {
       if (settled) return
       settled = true
-      finished = true
-      clearFailTimer()
-      try {
-        es.close()
-      } catch (_) {
-        /* ignore */
-      }
       onDone?.()
       resolve()
     }
@@ -159,78 +222,48 @@ export function streamPlanSummary(planId, style = 'normal', handlers = {}) {
     const settleErr = (err) => {
       if (settled) return
       settled = true
-      finished = true
-      clearFailTimer()
-      smooth.cancel()
-      try {
-        es.close()
-      } catch (_) {
-        /* ignore */
-      }
       onError?.(err)
       reject(err)
     }
 
     async function postFallback() {
-      const smooth2 = createSmoothStream(onDelta)
+      const smooth = createSmoothStream(onDelta)
       try {
         const res = await generatePlanSummary(planId, style)
         const text = res.summary || ''
-        if (text) smooth2.push(text)
-        await smooth2.waitDrained()
-        smooth2.cancel()
+        if (text) smooth.push(text)
+        await smooth.waitDrained()
+        smooth.cancel()
         settleOk()
       } catch (e) {
         settleErr(e instanceof Error ? e : new Error(String(e)))
       }
     }
 
-    es.addEventListener('summaryerror', (ev) => {
-      try {
-        const p = JSON.parse(ev.data || '{}')
-        settleErr(new Error(p.detail || 'AI 总结失败'))
-      } catch (e) {
-        settleErr(e instanceof Error ? e : new Error(String(e)))
-      }
-    })
-
-    es.onopen = () => {
-      clearFailTimer()
+    if (!base) {
+      void postFallback()
+      return
     }
 
-    es.onmessage = async (ev) => {
-      if (fallbackLatch) return
+    const url = `${base}/api/plans/${encodeURIComponent(planId)}/ai/summary/stream?style=${encodeURIComponent(style)}`
+    const smooth = createSmoothStream(onDelta)
+
+    void (async () => {
       try {
-        const p = JSON.parse(ev.data || '{}')
-        if (p.delta || p.done) gotStreamData = true
-        clearFailTimer()
-        if (p.delta) smooth.push(p.delta)
-        if (p.done) {
-          await smooth.waitDrained()
+        const ok = await readSseStreamWithFetch(url, smooth, settleErr)
+        if (settled) return
+        if (ok) {
           smooth.cancel()
           settleOk()
+          return
         }
-      } catch (_) {
-        /* ignore malformed chunk */
-      }
-    }
-
-    /** EventSource 在跨网关/CORS 下常误报；若一段时间仍无任何 SSE 数据则改走 POST */
-    es.onerror = () => {
-      if (finished || gotStreamData || fallbackLatch) return
-      if (failTimer != null) clearTimeout(failTimer)
-      failTimer = setTimeout(() => {
-        failTimer = null
-        if (finished || gotStreamData || fallbackLatch) return
-        fallbackLatch = true
         smooth.cancel()
-        try {
-          es.close()
-        } catch (_) {
-          /* ignore */
-        }
-        void postFallback()
-      }, 800)
-    }
+        await postFallback()
+      } catch (e) {
+        smooth.cancel()
+        if (!settled) await postFallback()
+        if (!settled) settleErr(e instanceof Error ? e : new Error(String(e)))
+      }
+    })()
   })
 }
