@@ -22,14 +22,16 @@ function resolveAllowOrigin(event) {
   const req = String(headerGet(h, 'Origin') || '').trim()
   if (req && req === allowed) return req
   if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(req)) return req
+  if (req && /^https:\/\/[\w.-]+\.tcloudbaseapp\.com$/i.test(req)) return req
   return allowed
 }
 
 function corsHeaders(event) {
   return {
     'Access-Control-Allow-Origin': resolveAllowOrigin(event),
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept, Last-Event-ID',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    Vary: 'Origin',
   }
 }
 

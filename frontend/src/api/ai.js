@@ -129,11 +129,38 @@ export function streamPlanSummary(planId, style = 'normal', handlers = {}) {
     const url = `${base}/api/plans/${encodeURIComponent(planId)}/ai/summary/stream?style=${encodeURIComponent(style)}`
     const es = new EventSource(url)
     let finished = false
+    let gotStreamData = false
+    let fallbackLatch = false
+    let failTimer = null
+    let settled = false
     const smooth = createSmoothStream(onDelta)
 
-    const fail = (err) => {
-      if (finished) return
+    const clearFailTimer = () => {
+      if (failTimer != null) {
+        clearTimeout(failTimer)
+        failTimer = null
+      }
+    }
+
+    const settleOk = () => {
+      if (settled) return
+      settled = true
       finished = true
+      clearFailTimer()
+      try {
+        es.close()
+      } catch (_) {
+        /* ignore */
+      }
+      onDone?.()
+      resolve()
+    }
+
+    const settleErr = (err) => {
+      if (settled) return
+      settled = true
+      finished = true
+      clearFailTimer()
       smooth.cancel()
       try {
         es.close()
@@ -144,40 +171,66 @@ export function streamPlanSummary(planId, style = 'normal', handlers = {}) {
       reject(err)
     }
 
+    async function postFallback() {
+      const smooth2 = createSmoothStream(onDelta)
+      try {
+        const res = await generatePlanSummary(planId, style)
+        const text = res.summary || ''
+        if (text) smooth2.push(text)
+        await smooth2.waitDrained()
+        smooth2.cancel()
+        settleOk()
+      } catch (e) {
+        settleErr(e instanceof Error ? e : new Error(String(e)))
+      }
+    }
+
     es.addEventListener('summaryerror', (ev) => {
       try {
         const p = JSON.parse(ev.data || '{}')
-        fail(new Error(p.detail || 'AI 总结失败'))
+        settleErr(new Error(p.detail || 'AI 总结失败'))
       } catch (e) {
-        fail(e instanceof Error ? e : new Error(String(e)))
+        settleErr(e instanceof Error ? e : new Error(String(e)))
       }
     })
 
+    es.onopen = () => {
+      clearFailTimer()
+    }
+
     es.onmessage = async (ev) => {
+      if (fallbackLatch) return
       try {
         const p = JSON.parse(ev.data || '{}')
+        if (p.delta || p.done) gotStreamData = true
+        clearFailTimer()
         if (p.delta) smooth.push(p.delta)
         if (p.done) {
           await smooth.waitDrained()
           smooth.cancel()
-          finished = true
-          try {
-            es.close()
-          } catch (_) {
-            /* ignore */
-          }
-          onDone?.()
-          resolve()
+          settleOk()
         }
       } catch (_) {
         /* ignore malformed chunk */
       }
     }
 
+    /** EventSource 在跨网关/CORS 下常误报；若一段时间仍无任何 SSE 数据则改走 POST */
     es.onerror = () => {
-      if (finished) return
-      smooth.cancel()
-      fail(new Error('SSE 连接中断（请检查云函数网关与 CORS）'))
+      if (finished || gotStreamData || fallbackLatch) return
+      if (failTimer != null) clearTimeout(failTimer)
+      failTimer = setTimeout(() => {
+        failTimer = null
+        if (finished || gotStreamData || fallbackLatch) return
+        fallbackLatch = true
+        smooth.cancel()
+        try {
+          es.close()
+        } catch (_) {
+          /* ignore */
+        }
+        void postFallback()
+      }, 800)
     }
   })
 }

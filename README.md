@@ -93,7 +93,7 @@ npm run build
 
 ### CORS
 
-`plan` / `weather` / `chat` 的 `corsOrigin.js` 将 `Access-Control-Allow-Origin` 收紧为 **静态托管 Origin**（默认即上表 URL），并允许 **localhost / 127.0.0.1 任意端口** 便于本地 Vite 调试。可通过云函数环境变量 **`LAB3_HOSTING_ORIGIN`** 覆盖默认托管域名。若手机访问的 **站点域名** 与默认不一致（例如换了静态托管域名），必须在 **`plan` 环境变量** 里设置 **`LAB3_HOSTING_ORIGIN`** 为手机打开的 **完整 Origin**（含 `https://`），否则浏览器会拦截跨域请求，表现为「加载不出」。
+`plan` / `weather` / `chat` 的 `corsOrigin.js` 将 `Access-Control-Allow-Origin` 设为 **`LAB3_HOSTING_ORIGIN`（或内置默认）与请求 `Origin` 一致时回显**，并额外允许 **`https://*.tcloudbaseapp.com`**（静态托管子域随环境会变，**EventSource** 跨网关访问云函数时必须回显真实 Origin）。仍允许 **localhost / 127.0.0.1 任意端口** 便于本地 Vite。自定义域名请设置 **`LAB3_HOSTING_ORIGIN`** 为实际站点 **完整 Origin**（含 `https://`），否则浏览器会拦截跨域，表现为「加载不出」或 **SSE 连接中断**。
 
 ### 高德 Web 端 Key 白名单
 
