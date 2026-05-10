@@ -34,7 +34,7 @@ project/
 
 **超时（FUNCTION_TIME_LIMIT_EXCEEDED）**：冷启动加载 **sql.js WASM**、从文档库拉整库、写回快照，以及 **`/ai/summary` 调大模型**，累计易超过 **15s**。请到 CloudBase 控制台 **云函数 → `plan` → 函数配置**，将**执行超时**调到 **60～120 秒**（`InitTimeout` 亦建议 ≥60）。若报错来自**网关 / 调用方**的单独超时，需在对应入口一并放宽。本仓库 `cloudbaserc.json` 的 **`functions`** 里已为 **`plan` 配置 `timeout: 120`**，`tcb fn deploy plan --force` 时会一并更新。若你习惯执行 **`tcb fn deploy --all`**，请在该数组中**补全** `weather`、`chat` 等条目（与控制台现有配置一致），否则 CLI 只会部署数组里列出的函数。
 
-**同容器加载慢 / 要刷很多次**：此前用「每次 HTTP 不同的 requestId」做 DB scope，**几乎每请求都会整库冷启**。现已改为 **`preparePlanDbForRequest`**：同实例 **复用内存 sql.js**；对 **`lab3_plan_sqlite` 做轻量 `field({ version, updatedAt })` 读取**；默认 **`LAB3_CLOUD_META_TTL_MS` 未设置时为 0**（**每次请求**都比对云端 version，换浏览器/多实例更稳）；需要减负时再设为毫秒数（如 `800`）。若 **云端 `version` > 本地 `cloudCasVersion`** 则丢弃缓存并重拉整库。若业务上仍 **404 Plan not found**，会 **整包从云端再拉一次**（每请求最多一次）自愈他实例刚写入或短暂读延迟。`flush` **CONFLICT** 时下一次请求 **强制重拉**。仍请保证 **云函数超时 ≥60s**。
+**同容器加载慢 / 要刷很多次**：此前用「每次 HTTP 不同的 requestId」做 DB scope，**几乎每请求都会整库冷启**。现已改为 **`preparePlanDbForRequest`**：同实例 **复用内存 sql.js**；对 **`lab3_plan_sqlite` 做轻量 `field({ version, updatedAt })` 读取**；默认 **`LAB3_CLOUD_META_TTL_MS` 未设置时为 0**（**每次请求**都比对云端 version，换浏览器/多实例更稳）；需要减负时再设为毫秒数（如 `800`）。若 **云端 `version` > 本地 `cloudCasVersion`** 则丢弃缓存并重拉整库。若业务上仍 **Plan not found**，会在**同一请求内**对云端快照 **最多重拉 3 次**（间隔约 150ms），自愈他实例刚写入、文档库读延迟或多实例空库。`flush` **CONFLICT** 时下一次请求 **强制重拉**。仍请保证 **云函数超时 ≥60s**。
 
 返回格式：HTTP 访问场景下使用 API 网关风格 `{ statusCode, headers, body }`，`body` 为 JSON 字符串；与原有 FastAPI 的 JSON 结构一致（错误为 `{ "detail": "..." }`）。
 
