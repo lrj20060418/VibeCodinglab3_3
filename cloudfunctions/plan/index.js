@@ -16,6 +16,14 @@ const { corsHeaders } = require('./corsOrigin')
 
 const ALLOWED_SLOTS = new Set(['morning', 'afternoon', 'evening'])
 
+/** 云 SQLite 与多实例读延迟：单次 miss 后只拉一次库仍可能空，允许少量重试 */
+const PLAN_MISS_MAX_HEAL = 3
+const PLAN_MISS_HEAL_BACKOFF_MS = 150
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function nowIso() {
   return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
@@ -34,6 +42,15 @@ function normalizePath(event) {
   if (idx >= 0) raw = raw.slice(idx)
   if (!raw.startsWith('/')) raw = '/' + raw
   return raw
+}
+
+function safeDecodePathSegment(seg) {
+  if (seg == null || typeof seg !== 'string') return seg
+  try {
+    return decodeURIComponent(seg)
+  } catch {
+    return seg
+  }
 }
 
 function getQuery(event) {
@@ -181,36 +198,45 @@ exports.main = async (event, context) => {
   const query = getQuery(event)
 
   try {
-    let planMissHealDone = false
-    let listEmptyHealAttempted = false
-
     async function withDbAfterPlanMissRetry(planId, readFn) {
-      let row = readFn(db)
-      if (row) return row
-      if (planMissHealDone) return null
-      planMissHealDone = true
-      await reloadDbFromCloudOnceAfterMiss()
-      db = await getDb()
-      return readFn(db)
+      for (let attempt = 0; attempt < PLAN_MISS_MAX_HEAL; attempt++) {
+        const row = readFn(db)
+        if (row) return row
+        if (attempt < PLAN_MISS_MAX_HEAL - 1) {
+          await reloadDbFromCloudOnceAfterMiss()
+          if (PLAN_MISS_HEAL_BACKOFF_MS > 0) await sleep(PLAN_MISS_HEAL_BACKOFF_MS)
+          db = await getDb()
+        }
+      }
+      return null
     }
 
     async function loadPlanBundleWithHeal(planId) {
-      let b = await loadPlanBundle(planId)
-      if (b) return b
-      if (planMissHealDone) return null
-      planMissHealDone = true
-      await reloadDbFromCloudOnceAfterMiss()
-      return loadPlanBundle(planId)
+      for (let attempt = 0; attempt < PLAN_MISS_MAX_HEAL; attempt++) {
+        const b = await loadPlanBundle(planId)
+        if (b) {
+          db = await getDb()
+          return b
+        }
+        if (attempt < PLAN_MISS_MAX_HEAL - 1) {
+          await reloadDbFromCloudOnceAfterMiss()
+          if (PLAN_MISS_HEAL_BACKOFF_MS > 0) await sleep(PLAN_MISS_HEAL_BACKOFF_MS)
+          db = await getDb()
+        }
+      }
+      return null
     }
 
     /* ---- Plans ---- */
     if (path === '/api/plans' && method === 'GET') {
       let rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
-      if (rows.length === 0 && isCloudFunctionRuntime() && !listEmptyHealAttempted) {
-        listEmptyHealAttempted = true
-        await reloadDbFromCloudOnceAfterMiss()
-        db = await getDb()
-        rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
+      if (rows.length === 0 && isCloudFunctionRuntime()) {
+        for (let attempt = 0; attempt < PLAN_MISS_MAX_HEAL - 1 && rows.length === 0; attempt++) {
+          await reloadDbFromCloudOnceAfterMiss()
+          if (PLAN_MISS_HEAL_BACKOFF_MS > 0) await sleep(PLAN_MISS_HEAL_BACKOFF_MS)
+          db = await getDb()
+          rows = db.prepare('SELECT * FROM plans ORDER BY datetime(updated_at) DESC').all()
+        }
       }
       return httpJson(event,200, rows)
     }
@@ -239,7 +265,7 @@ exports.main = async (event, context) => {
 
     let m = path.match(/^\/api\/plans\/([^/]+)$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const row = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
       )
@@ -248,7 +274,7 @@ exports.main = async (event, context) => {
     }
 
     if (m && method === 'PUT') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const cur = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
       )
@@ -281,7 +307,7 @@ exports.main = async (event, context) => {
     /* ---- Places ---- */
     m = path.match(/^\/api\/plans\/([^/]+)\/places$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const plan = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -295,7 +321,7 @@ exports.main = async (event, context) => {
     }
 
     if (m && method === 'POST') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const plan = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -324,8 +350,8 @@ exports.main = async (event, context) => {
 
     m = path.match(/^\/api\/plans\/([^/]+)\/places\/([^/]+)$/)
     if (m && method === 'DELETE') {
-      const planId = m[1]
-      const placeId = m[2]
+      const planId = safeDecodePathSegment(m[1])
+      const placeId = safeDecodePathSegment(m[2])
       const plan = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -339,7 +365,7 @@ exports.main = async (event, context) => {
     /* ---- Itinerary ---- */
     m = path.match(/^\/api\/plans\/([^/]+)\/itinerary$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const plan = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -353,7 +379,7 @@ exports.main = async (event, context) => {
     }
 
     if (m && method === 'PUT') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const plan = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -389,7 +415,7 @@ exports.main = async (event, context) => {
     /* ---- Export / checks ---- */
     m = path.match(/^\/api\/plans\/([^/]+)\/export$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const bundle = await loadPlanBundleWithHeal(planId)
       if (!bundle) return httpError(event,404, 'Plan not found')
       const fmt = String(query.format || 'md').toLowerCase().trim()
@@ -408,7 +434,7 @@ exports.main = async (event, context) => {
 
     m = path.match(/^\/api\/plans\/([^/]+)\/checks$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const bundle = await loadPlanBundleWithHeal(planId)
       if (!bundle) return httpError(event,404, 'Plan not found')
       return httpJson(event,200, {
@@ -436,7 +462,7 @@ exports.main = async (event, context) => {
 
     m = path.match(/^\/api\/plans\/([^/]+)\/weather\/live$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const planRow = await withDbAfterPlanMissRetry(planId, (d) =>
         d.prepare('SELECT id FROM plans WHERE id = ?').get(planId)
       )
@@ -466,7 +492,7 @@ exports.main = async (event, context) => {
 
     m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary\/stream$/)
     if (m && method === 'GET') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const q = getQuery(event)
       const style = String(q.style || 'normal')
         .trim()
@@ -524,7 +550,7 @@ exports.main = async (event, context) => {
 
     m = path.match(/^\/api\/plans\/([^/]+)\/ai\/summary$/)
     if (m && method === 'POST') {
-      const planId = m[1]
+      const planId = safeDecodePathSegment(m[1])
       const style = String(body.style || 'normal')
         .trim()
         .toLowerCase()
