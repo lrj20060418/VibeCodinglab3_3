@@ -3,7 +3,7 @@ import { planApiBase } from './config'
 const API_BASE = planApiBase()
 
 async function http(method, path) {
-  const res = await fetch(`${API_BASE}${path}`, { method })
+  const res = await fetch(`${API_BASE}${path}`, { method, cache: 'no-store' })
   const contentType = res.headers.get('content-type') || ''
   const isJson = contentType.includes('application/json')
   const data = isJson ? await res.json() : await res.text()

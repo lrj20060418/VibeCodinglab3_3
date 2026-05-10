@@ -30,7 +30,9 @@ project/
 | `weather` | 仅保留兼容；各函数 `/tmp` 隔离，**勿**把「按规划拉天气」指到本函数 | 同左路径若部署在 plan 上 |
 | `chat` | 仅保留兼容；**AI 摘要**请在控制台为 **plan** 配置 `LLM_*` | 同左 |
 
-**说明**：云函数实例间 **不共享** `/tmp` 内 SQLite。前端已将天气与 AI 请求指向 **与 CRUD 相同的 `plan` Base URL**；`plan` 云函数另将 sql.js 快照 **同步到文档型数据库集合 `lab3_plan_sqlite`**（**建议仅保留一条** `default` 文档），请求结束时写入，冷启动时拉取，以缓解多实例「Plan not found」。写入使用整数 **`version`**：先 `where({ version }).update`（CAS）；若部分环境下 `updated` 为 0，则对 **`doc('default')` 做 `update` 回退**（单文档集合下与 CAS 等价）。真并发冲突时仅在日志中打出 **CONFLICT**，**不再在 `finally` 里抛错**，以免吞掉已成功构造的 HTTP 200、导致前端误判或长时间无响应。旧数据无 `version` 时首次加载会补写 `version: 1`。本地用 `node` 直跑代码时无腾讯云密钥，会跳过同步（可设 `LAB3_DISABLE_CLOUD_SQLITE=1`）。
+**说明**：云函数实例间 **不共享** `/tmp` 内 SQLite。前端已将天气与 AI 请求指向 **与 CRUD 相同的 `plan` Base URL**；`plan` 云函数另将 sql.js 快照 **同步到文档型数据库集合 `lab3_plan_sqlite`**（**建议仅保留一条** `default` 文档），请求结束时写入，冷启动时拉取，以缓解多实例「Plan not found」。
+
+**必建集合（否则会报 `DATABASE_COLLECTION_NOT_EXIST` / 保存失败）**：在 CloudBase 控制台 **文档型数据库** 中创建集合 **`lab3_plan_sqlite`**（名称完全一致）。无需预置文档，云函数首次写入会创建 `default` 文档。若使用新环境，请先建集合再部署/调用 `plan`。写入使用整数 **`version`**：先 `where({ version }).update`（CAS）；若部分环境下 `updated` 为 0，则对 **`doc('default')` 做 `update` 回退**（单文档集合下与 CAS 等价）。真并发冲突时仅在日志中打出 **CONFLICT**，**不再在 `finally` 里抛错**，以免吞掉已成功构造的 HTTP 200、导致前端误判或长时间无响应。旧数据无 `version` 时首次加载会补写 `version: 1`。本地用 `node` 直跑代码时无腾讯云密钥，会跳过同步（可设 `LAB3_DISABLE_CLOUD_SQLITE=1`）。
 
 **超时（FUNCTION_TIME_LIMIT_EXCEEDED）**：冷启动加载 **sql.js WASM**、从文档库拉整库、写回快照，以及 **`/ai/summary` 调大模型**，累计易超过 **15s**。请到 CloudBase 控制台 **云函数 → `plan` → 函数配置**，将**执行超时**调到 **60～120 秒**（`InitTimeout` 亦建议 ≥60）。若报错来自**网关 / 调用方**的单独超时，需在对应入口一并放宽。本仓库 `cloudbaserc.json` 的 **`functions`** 里已为 **`plan` 配置 `timeout: 120`**，`tcb fn deploy plan --force` 时会一并更新。若你习惯执行 **`tcb fn deploy --all`**，请在该数组中**补全** `weather`、`chat` 等条目（与控制台现有配置一致），否则 CLI 只会部署数组里列出的函数。
 
@@ -126,11 +128,10 @@ npm run build
 - **仍用外部 Key**：照常配置 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，或显式 `LAB3_AI_BACKEND=external`。
 - **模型切换**：`LAB3_CLOUD_AI_PROVIDER=deepseek` 或 `LAB3_CLOUD_AI_MODEL=deepseek-v3.2` 等（见 `.env.example`）；默认混元 `hunyuan-2.0-instruct-20251111`。
 
-### 流式 AI（SSE + EventSource）
+### AI 总结（POST 为主；云函数仍保留 SSE 路由）
 
-- 网关路由：**`GET /api/plans/:planId/ai/summary/stream?style=normal`**（`style` 同 POST）。
-- 响应：`Content-Type: text/event-stream`，正文为 SSE：`data: {"delta":"..."}` 增量；结束为 `data: {"done":true}`；业务错误为自定义事件 **`summaryerror`**（仍 200，便于 EventSource 解析）。
-- **说明**：云函数 HTTP 一般为**整包返回**，真·逐字网络流式受限。前端在 `frontend/src/api/ai.js` 用 **`fetch` + `ReadableStream` 读 SSE**（较 `EventSource` 更易按 body 分块处理），并用 **定时器小步（约每 26ms 刷 4 字）**调用 `onDelta`，保证肉眼可见的「打字」效果；未收到 `done` 或失败时回退 **`POST /ai/summary`** 并同样分步展示。未配置 `VITE_CLOUD_PLAN_URL` 时仅走 POST。
+- **当前前端默认**：**`POST /api/plans/:planId/ai/summary`**（`frontend/src/api/ai.js` 的 `generatePlanSummary`），简单稳定、与网关/CORS 兼容性好。
+- **流式（可选）**：网关仍提供 **`GET /api/plans/:planId/ai/summary/stream?style=normal`**，`Content-Type: text/event-stream`，SSE `data: {"delta":"..."}` / `{"done":true}`，错误事件 **`summaryerror`**。需要时可在前端自行接 `fetch`+流式解析；未配置 `VITE_CLOUD_PLAN_URL` 时本地开发仅走 POST。
 
 ### CI/CD（GitHub Actions）
 

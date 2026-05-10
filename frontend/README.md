@@ -10,6 +10,12 @@ npm run dev
 
 默认开发地址通常是 `http://localhost:5173/`。
 
+## 响应式与手机端（≤768px）
+
+- 顶栏左侧 **「规划列表」** 打开侧栏抽屉；遮罩点击或 **×** 关闭；选中规划后自动收起。
+- 顶栏按钮与表单控件加大触控目标（约 44px），地图高度随视口（`vh`/`clamp`），支持 `viewport-fit=cover` 与底部安全区。
+- 窄屏下导出按钮显示为 **MD / JSON** 短文案以节省空间。
+
 ## Lab 3-3 v2.0：本地静态页 + 云端云函数（`python -m http.server`）
 
 实验要求：**不用 Vite dev server**，用纯静态服务器打开前端，同时 API 走 CloudBase 公网。

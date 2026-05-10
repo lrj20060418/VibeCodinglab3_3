@@ -17,11 +17,34 @@ const { corsHeaders } = require('./corsOrigin')
 const ALLOWED_SLOTS = new Set(['morning', 'afternoon', 'evening'])
 
 /** 云 SQLite 与多实例读延迟：单次 miss 后只拉一次库仍可能空，允许少量重试 */
-const PLAN_MISS_MAX_HEAL = 3
-const PLAN_MISS_HEAL_BACKOFF_MS = 150
+const PLAN_MISS_MAX_HEAL = 7
+const PLAN_MISS_HEAL_BACKOFF_MS = 220
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 规划写入后同步文档库；失败时带一次退避重试（减轻偶发网络抖动）。 */
+async function flushPlanDbOrError(event) {
+  let r = await flushPendingCloud()
+  if (r && r.ok === false && r.code !== 'CONFLICT') {
+    await sleep(300)
+    r = await flushPendingCloud()
+  }
+  if (r && r.ok === false) {
+    let msg =
+      r.code === 'CONFLICT'
+        ? '云端数据已在别处更新，请先刷新列表再保存'
+        : '写入云端失败，请稍后重试'
+    if (r.code === 'ERROR' && r.message) {
+      msg = `写入云端失败：${r.message}`
+    } else if (r.code === 'SYNC_FAILED') {
+      msg =
+        '写入云端失败：云数据库返回异常（常见为网络抖动、文档过大超限、或集合权限）。请稍后重试；若持续出现请查看云函数日志中的 [db] flush cloud / [cloudSqlite]。'
+    }
+    return httpError(event, 409, msg)
+  }
+  return null
 }
 
 function nowIso() {
@@ -41,6 +64,9 @@ function normalizePath(event) {
   const idx = raw.indexOf('/api/')
   if (idx >= 0) raw = raw.slice(idx)
   if (!raw.startsWith('/')) raw = '/' + raw
+  // 部分网关只保留 /plans/:id，与路由统一为 /api/plans/:id
+  const plansOnly = raw.match(/^\/plans\/([^/]+)$/)
+  if (plansOnly) raw = `/api/plans/${plansOnly[1]}`
   return raw
 }
 
@@ -191,7 +217,13 @@ exports.main = async (event, context) => {
     return httpJson(event,200, { ok: true })
   }
 
-  await preparePlanDbForRequest()
+  /**
+   * 仅「打开单条规划 GET」强制整包重拉：换浏览器/换实例时与列表对齐。
+   * 不在 PUT / 列表 GET 上强拉：否则每次保存 = 先整包下载再整包上传，极慢且易在 refresh 时读到空列表。
+   */
+  const forceReloadPlanBlob = method === 'GET' && /^\/api\/plans\/[^/]+$/.test(path)
+
+  await preparePlanDbForRequest({ forceReloadBlob: forceReloadPlanBlob })
 
   let db = await getDb()
   const body = parseBody(event)
@@ -259,7 +291,8 @@ exports.main = async (event, context) => {
         t
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(id)
-      await flushPendingCloud()
+      const flushErr = await flushPlanDbOrError(event)
+      if (flushErr) return flushErr
       return httpJson(event,200, row)
     }
 
@@ -300,7 +333,8 @@ exports.main = async (event, context) => {
         planId
       )
       const row = db.prepare('SELECT * FROM plans WHERE id = ?').get(planId)
-      await flushPendingCloud()
+      const flushErr = await flushPlanDbOrError(event)
+      if (flushErr) return flushErr
       return httpJson(event,200, row)
     }
 

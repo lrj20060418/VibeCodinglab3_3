@@ -1,10 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { createPlan, getPlan, listPlans, updatePlan } from '../api/plans'
 import { addPlace, deletePlace, listPlaces } from '../api/places'
 import { getLiveWeatherByAdcode, getPlanLiveWeathers } from '../api/weather'
 import { getItinerary, saveItinerary } from '../api/itinerary'
-import { streamPlanSummary } from '../api/ai'
+import { generatePlanSummary } from '../api/ai'
 import { exportPlan, downloadJson, downloadText } from '../api/export'
 import { getPlanChecks } from '../api/checks'
 
@@ -61,6 +61,26 @@ const aiSummary = ref('')
 const checksLoading = ref(false)
 const checksError = ref('')
 const checks = ref([])
+
+/** 窄屏侧栏抽屉：规划列表从左侧滑出，避免小屏上长列表顶在内容前 */
+const planDrawerOpen = ref(false)
+
+function closePlanDrawer() {
+  planDrawerOpen.value = false
+}
+
+function togglePlanDrawer() {
+  planDrawerOpen.value = !planDrawerOpen.value
+}
+
+let mqDrawer = null
+function syncDrawerFromMq() {
+  if (typeof window === 'undefined' || !window.matchMedia) return
+  if (!mqDrawer) {
+    mqDrawer = window.matchMedia('(min-width: 769px)')
+  }
+  if (mqDrawer.matches) planDrawerOpen.value = false
+}
 
 async function refreshChecks() {
   checksError.value = ''
@@ -128,20 +148,34 @@ function normalizePayload() {
   return payload
 }
 
-async function refreshPlans() {
+/**
+ * @param {Record<string, unknown> | null} [justSaved] 刚保存/创建返回的一行；列表接口偶发空读时用来保住侧栏，避免「已保存但暂无规划」。
+ */
+async function refreshPlans(justSaved = null) {
   listLoading.value = true
   listError.value = ''
   try {
-    plans.value = await listPlans()
+    const rows = await listPlans()
+    if (justSaved && justSaved.id) {
+      const others = rows.filter((p) => p.id !== justSaved.id)
+      plans.value = [justSaved, ...others]
+    } else {
+      plans.value = rows
+    }
   } catch (e) {
     listError.value = e?.message || '加载规划列表失败'
-    plans.value = []
+    if (justSaved && justSaved.id) {
+      plans.value = [justSaved]
+    } else {
+      plans.value = []
+    }
   } finally {
     listLoading.value = false
   }
 }
 
 async function openPlan(planId) {
+  closePlanDrawer()
   selectedPlanId.value = planId
   localStorage.setItem(LAST_OPEN_PLAN_ID_KEY, planId)
 
@@ -150,7 +184,18 @@ async function openPlan(planId) {
   saveError.value = ''
   saveSuccess.value = false
   try {
-    const p = await getPlan(planId)
+    let p
+    const maxTry = 5
+    for (let t = 0; t < maxTry; t++) {
+      try {
+        p = await getPlan(planId)
+        break
+      } catch (e) {
+        const is404 = e?.status === 404 || /not found/i.test(e?.message || '')
+        if (!is404 || t === maxTry - 1) throw e
+        await new Promise((r) => setTimeout(r, 400 + t * 150))
+      }
+    }
     form.title = p.title || ''
     form.date = p.date || todayISO()
     form.budget = p.budget ?? ''
@@ -159,10 +204,21 @@ async function openPlan(planId) {
   } catch (e) {
     const msg = e?.message || '加载规划失败'
     if (e?.status === 404 || /not found/i.test(msg)) {
-      localStorage.removeItem(LAST_OPEN_PLAN_ID_KEY)
-      selectedPlanId.value = null
-      planError.value =
-        '该规划不存在或已失效（例如切换了云端环境、或多实例尚未同步）。请从左侧列表重新选择或新建。'
+      const cached = (plans.value || []).find((p) => p.id === planId)
+      if (cached) {
+        form.title = cached.title || ''
+        form.date = cached.date || todayISO()
+        form.budget = cached.budget ?? ''
+        form.people_count = cached.people_count ?? ''
+        form.preferences = cached.preferences || ''
+        planError.value =
+          '云端详情暂未同步（常见于刚保存后）。已用侧栏列表中的数据填充表单，可稍候再点「重试」或刷新列表。'
+      } else {
+        localStorage.removeItem(LAST_OPEN_PLAN_ID_KEY)
+        selectedPlanId.value = null
+        planError.value =
+          '该规划不存在或已失效（例如切换了云端环境、或多实例尚未同步）。请从左侧列表重新选择或新建。'
+      }
     } else {
       planError.value = msg
     }
@@ -176,6 +232,7 @@ async function openPlan(planId) {
 }
 
 function newPlan() {
+  closePlanDrawer()
   selectedPlanId.value = null
   localStorage.removeItem(LAST_OPEN_PLAN_ID_KEY)
   resetForm()
@@ -204,11 +261,11 @@ async function savePlan() {
       localStorage.setItem(LAST_OPEN_PLAN_ID_KEY, saved.id)
     }
 
-    saveSuccess.value = true
-    await refreshPlans()
+    await refreshPlans(saved)
     await refreshPlaces()
     await refreshItinerary()
     await refreshChecks()
+    saveSuccess.value = true
   } catch (e) {
     saveError.value = e?.message || '保存失败'
   } finally {
@@ -410,17 +467,10 @@ async function runAiSummary() {
   aiSummary.value = ''
   aiLoading.value = true
   try {
-    await streamPlanSummary(selectedPlanId.value, 'normal', {
-      onDelta(chunk) {
-        aiSummary.value += chunk
-      },
-      onDone() {},
-      onError(e) {
-        aiError.value = e?.message || 'AI 总结生成失败'
-      },
-    })
+    const res = await generatePlanSummary(selectedPlanId.value, 'normal')
+    aiSummary.value = res.summary || ''
   } catch (e) {
-    if (!aiError.value) aiError.value = e?.message || 'AI 总结生成失败'
+    aiError.value = e?.message || 'AI 总结生成失败'
   } finally {
     aiLoading.value = false
   }
@@ -522,38 +572,78 @@ async function removePlace(placeId) {
 }
 
 onMounted(async () => {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    mqDrawer = window.matchMedia('(min-width: 769px)')
+    mqDrawer.addEventListener('change', syncDrawerFromMq)
+  }
+
   resetForm()
+  // 地图与规划 API 解耦：云端列表/详情若较慢或挂起，不应阻塞高德初始化
+  initAmap()
+
   await refreshPlans()
 
   const lastId = localStorage.getItem(LAST_OPEN_PLAN_ID_KEY)
   if (lastId) {
     await openPlan(lastId)
   }
+})
 
-  initAmap()
+onUnmounted(() => {
+  if (mqDrawer) mqDrawer.removeEventListener('change', syncDrawerFromMq)
 })
 </script>
 
 <template>
   <div class="app-shell">
     <header class="topbar">
-      <div class="brand">
-        <div class="title">智能出行规划器</div>
-        <div class="subtitle">出行规划</div>
+      <div class="topbar-left">
+        <button
+          type="button"
+          class="btn nav-toggle"
+          aria-label="打开或收起规划列表"
+          :aria-expanded="planDrawerOpen ? 'true' : 'false'"
+          aria-controls="plan-sidebar"
+          @click="togglePlanDrawer"
+        >
+          规划列表
+        </button>
+        <div class="brand">
+          <div class="title">智能出行规划器</div>
+          <div class="subtitle">出行规划 · 多端同步</div>
+        </div>
       </div>
       <div class="top-actions">
         <button class="btn" type="button" @click="newPlan">新建</button>
         <button class="btn primary" type="button" :disabled="saving || planLoading" @click="savePlan">
           {{ saving ? '保存中…' : '保存' }}
         </button>
-        <button class="btn" type="button" :disabled="!selectedPlanId" @click="runExport('md')">导出 MD</button>
-        <button class="btn" type="button" :disabled="!selectedPlanId" @click="runExport('json')">导出 JSON</button>
+        <button class="btn export-btn" type="button" :disabled="!selectedPlanId" @click="runExport('md')">
+          <span class="export-lbl-full">导出 MD</span><span class="export-lbl-short">MD</span>
+        </button>
+        <button class="btn export-btn" type="button" :disabled="!selectedPlanId" @click="runExport('json')">
+          <span class="export-lbl-full">导出 JSON</span><span class="export-lbl-short">JSON</span>
+        </button>
       </div>
     </header>
 
+    <div
+      v-show="planDrawerOpen"
+      class="drawer-overlay"
+      aria-hidden="true"
+      @click="closePlanDrawer"
+    />
+
     <main class="main">
-      <aside class="sidebar">
-        <div class="panel-title">我的规划</div>
+      <aside
+        id="plan-sidebar"
+        class="sidebar"
+        :class="{ 'sidebar--open': planDrawerOpen }"
+      >
+        <div class="sidebar-head">
+          <div class="panel-title">我的规划</div>
+          <button type="button" class="btn drawer-close" aria-label="关闭规划列表" @click="closePlanDrawer">×</button>
+        </div>
 
         <div v-if="listLoading" class="state">加载中…</div>
         <div v-else-if="listError" class="state error">
@@ -584,6 +674,7 @@ onMounted(async () => {
         </ul>
       </aside>
 
+      <div class="main-inner">
       <section class="content">
         <div class="card">
           <div class="card-header">
@@ -838,6 +929,7 @@ onMounted(async () => {
           </div>
         </div>
       </section>
+      </div>
     </main>
   </div>
 </template>
@@ -850,22 +942,75 @@ onMounted(async () => {
 
 .app-shell {
   min-height: 100svh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .topbar {
+  --topbar-h: 52px;
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  padding-top: max(12px, env(safe-area-inset-top, 0px));
+  min-height: var(--topbar-h);
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(10px);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.nav-toggle {
+  display: none;
+  flex-shrink: 0;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.drawer-overlay {
+  display: none;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sidebar-head .panel-title {
+  margin-bottom: 8px;
+}
+
+.drawer-close {
+  display: none;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+  border-radius: 10px;
+}
+
+.export-lbl-short {
+  display: none;
 }
 
 .brand .title {
@@ -882,7 +1027,10 @@ onMounted(async () => {
 
 .top-actions {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
 }
 
 .main {
@@ -891,9 +1039,15 @@ onMounted(async () => {
   margin: 0 auto;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   border-inline: 1px solid var(--border);
   box-sizing: border-box;
+}
+
+.main-inner {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .sidebar {
@@ -907,6 +1061,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .panel-title {
@@ -1129,7 +1285,8 @@ onMounted(async () => {
 }
 
 .map {
-  height: 380px;
+  height: clamp(240px, 42vh, 420px);
+  min-height: 220px;
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
@@ -1341,6 +1498,146 @@ onMounted(async () => {
   }
   .slot-row {
     grid-template-columns: 1fr;
+  }
+}
+
+/* 手机：侧栏抽屉 + 触控区域 + 导出按钮短文案 */
+@media (max-width: 768px) {
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: manipulation;
+  }
+
+  .drawer-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(3px);
+  }
+
+  .main {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    border-inline: none;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: max(var(--topbar-h), env(safe-area-inset-top, 0px));
+    left: 0;
+    bottom: 0;
+    width: min(304px, 88vw);
+    max-width: 100%;
+    z-index: 45;
+    margin: 0;
+    padding: 14px 14px calc(16px + env(safe-area-inset-bottom, 0px));
+    border-right: 1px solid var(--border);
+    border-bottom: none;
+    background: var(--bg);
+    box-shadow: none;
+    transform: translateX(-108%);
+    transition: transform 0.28s ease;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .sidebar.sidebar--open {
+    transform: translateX(0);
+    box-shadow: 8px 0 28px rgba(0, 0, 0, 0.2);
+  }
+
+  .drawer-close {
+    display: inline-flex;
+  }
+
+  .brand .title {
+    font-size: 16px;
+  }
+  .brand .subtitle {
+    font-size: 12px;
+  }
+
+  .top-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .top-actions .btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: center;
+    text-align: center;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  .export-lbl-full {
+    display: none;
+  }
+  .export-lbl-short {
+    display: inline;
+  }
+
+  .content {
+    padding: 12px max(12px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px))
+      max(12px, env(safe-area-inset-left, 0px));
+  }
+
+  .btn,
+  .plan-item,
+  .select {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  .btn.small {
+    min-height: 40px;
+  }
+
+  .map {
+    height: min(48vh, 360px);
+    min-height: 200px;
+  }
+
+  .card {
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .form-actions {
+    flex-wrap: wrap;
+  }
+
+  .form-actions .btn {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 120px;
+  }
+
+  .place-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .place-item .btn {
+    align-self: flex-end;
+  }
+
+  .ai-result {
+    font-size: 15px;
+    line-height: 1.55;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .plan-item:active,
+  .btn:active {
+    opacity: 0.92;
   }
 }
 </style>
